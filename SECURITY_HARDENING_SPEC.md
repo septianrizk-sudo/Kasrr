@@ -1,8 +1,13 @@
-# KASRR — Security Hardening Specification (Evaluation)
+# KASRR — Security Hardening Specification (Evaluation) — REVISI 1
 
 **Status:** Perencanaan saja (planning mode). Tidak ada kode aplikasi yang diedit. Menunggu persetujuan owner sebelum implementasi.
-**Basis:** Keputusan Final Owner (1–6) + temuan audit sebelumnya pada `Kasir Kopi (1).html` (877 baris).
+**Basis:** Keputusan Final Owner (1–6) + catatan revisi owner (7 butir) + temuan audit sebelumnya pada `Kasir Kopi (1).html` (877 baris).
 **Branch:** `audit/authentication` (berbasis `main`). PR: [#4](https://github.com/septianrizk-sudo/Kasrr/pull/4) — tidak di-merge.
+
+## Riwayat Revisi
+| Revisi | Perubahan utama | Alasan teknis |
+|---|---|---|
+| R1 (ini) | Recovery PIN tanpa PIN default; rotasi Master Code wajib & atomic; Master Code min 12 karakter; parameter PBKDF2 final (600k iterasi, salt 16B, async-only); strategi migrasi idempoten + backup envelope policy; verifikasi Web Crypto pada APK WebIntoApp sebenarnya; batas perlindungan & threat model; tambahan uji T13–T20 | Menutup celah lockout & PIN bawaan, menghilangkan ambiguity parameter, memenuhi batasan offline/WebView, memperkuat jaminan tidak ada data bisnis hilang. |
 
 ---
 
@@ -11,8 +16,8 @@
 | Keputusan Owner | Kondisi Saat Ini (Bukti) | Evaluasi |
 |---|---|---|
 | 1. Setup PIN via menu Pengaturan, bukan prompt wajib pertama buka | Seed selalu membuat `pin:hash('1234')` + `pinDefault:true` (L170); `go()` langsung meminta PIN untuk tab LOCKED (L367-376) | **Belum sesuai.** Area owner selalu "terproteksi" oleh PIN default 1234 sejak awal. Perlu flag `pinEnabled` agar state awal = belum dilindungi. |
-| 2. Pemulihan PIN via Master Code buatan owner | Master default `888888` (L170); reset mengembalikan PIN ke 1234 (L791) | **Belum sesuai.** Master Code harus dibuat owner, tanpa default, dan wajib dirotasi setelah dipakai. |
-| 3. Area owner terkunci otomatis setelah 5 menit idle | Tidak ada timer idle sama sekali; `view.unlocked` hanya reset saat pindah tab (L369-370) | **Belang belum ada.** Perlu idle timer 5 menit + reset pada aktivitas relevan. |
+| 2. Pemulihan PIN via Master Code buatan owner | Master default `888888` (L170); reset mengembalikan PIN ke 1234 (L791) | **Belum sesuai.** Master Code harus dibuat owner (min 12 karakter), tanpa default, single-use, rotasi wajib. |
+| 3. Area owner terkunci otomatis setelah 5 menit idle | Tidak ada timer idle sama sekali; `view.unlocked` hanya reset saat pindah tab (L369-370) | **Belum ada.** Perlu idle timer 5 menit + reset pada aktivitas relevan. |
 | 4. Terkunci saat app background / device lock | Tidak ada `visibilitychange` handler | **Belum ada.** Perlu lock on hidden + re-lock on visible. |
 | 5. Offline-friendly, penyimpanan lokal | localStorage (L151, L186-189) | **Sesai.** Dipertahankan. |
 | 6. Backup/restore manual kompatibel | Backup JSON (L779), restore via file (L855-863) | **Sesai.** Migrasi credential harus menjaga format backup tetap dapat dipulihkan. |
@@ -21,57 +26,74 @@
 
 ## 1. Spesifikasi Arsitektur Keamanan Final
 
-### State (tambahan pada objek state `S`)
-```
-S.pinEnabled      : boolean   // false = area owner belum dilindungi
-S.pinHash         : string    // PBKDF2 output (base64url) atau null
-S.pinSalt         : Uint8Array->base64url | null
-S.pinIter         : number    // iterasi PBKDF2
-S.masterHash      : string | null
-S.masterSalt      : base64url | null
-S.masterUsed      : boolean   // true bila master pernah dipakai -> wajib rotasi
-S.pinFails        : number    // counter percobaan PIN gagal
-S.pinLockUntil    : number    // epoch ms lockout PIN
-S.masterFails     : number
-S.masterLockUntil : number
-S.lastActive      : number    // epoch ms untuk idle timer
-S.sessionStart    : number    // epoch ms saat unlock (opsional, audit)
-```
+### 1.1 Parameter kriptografi final (keputusan, bukan rentang)
+| Parameter | Nilai final | Alasan |
+|---|---|---|
+| Algoritma | PBKDF2-HMAC-SHA-256 via `crypto.subtle.deriveBits` | Rekomendasi OWASP 2023 untuk KDF password; didukung Web Crypto. |
+| Iterasi | **600.000** | OWASP 2023 untuk PBKDF2-HMAC-SHA-256. **Gate wajib:** benchmark pada perangkat Android target sebelum sign-off; bila derive > 1,0 detik pada target, eskalasi ke owner dengan angka ukur — **tidak ada penurunan otomatis**. |
+| Salt | 16 byte acak dari `crypto.getRandomValues` per credential | Mencegah rainbow table antar-pengguna/instalasi. |
+| Output | 256 bit, disimpan base64url | Ukuran tetap, aman untuk JSON. |
+| Fallback hash custom | **DILARANG** | Bila Web Crypto tidak tersedia → fail closed (owner area diblokir), bukan turun ke hash tidak aman. |
+| Sinkron vs async | Semua derive/verify **async** (`await`) | `crypto.subtle` intrinsik async; UI modal wajib menunggu tanpa membekukan event loop. |
 
-### Komponen
-1. **Security Settings (di menu Atur)** — aktif/nonaktifkan PIN, buat/ubah Master Code, status proteksi.
-2. **Credential Store** — envelope `{hash, salt, iter}` untuk PIN & Master Code; disimpan di `S` (localStorage), tanpa plaintext.
-3. **Session Guard** — `view.unlocked` + `S.lastActive`; idle 5 menit; visibility lock.
-4. **Rate Limiter** — counter + lockout epoch untuk PIN dan Master Code.
-5. **Migration Layer** — deteksi format lama (`S.pin` string legacy) → envelope baru tanpa reset data.
+### 1.2 Envelope credential (disimpan di `S`, localStorage)
+```
+S.schemaVersion   : 2
+S.pinEnabled      : boolean        // false = belum dilindungi (belum ada PIN aktif)
+S.pin             : { hash, salt, iter } | null   // PBKDF2 envelope; null bila pinEnabled=false
+S.master          : { hash, salt, iter } | null   // null = belum dibuat / sudah hangus
+S.recovery        : { active:boolean, step:number } | null  // wizard recovery berjalan
+S.pinFails, S.pinLockUntil, S.masterFails, S.masterLockUntil : number
+S.lastActive, S.sessionStart : number
+```
+Field legacy (`S.pin` string `h…-<len>`, `S.master` string) **hanya** ada sebelum migrasi; lihat §5.
 
-### Aturan akses
-- `pinEnabled=false`: tab owner (rekap/stok/atur) **dapat dibuka** tetapi menampilkan status "belum terlindungi" + CTA setup PIN; **tidak ada** data owner yang ditampilkan sebagai "terbuka lebar" — konten sensitif (laporan keuangan detail) tetap bisa diakses karena memang belum ada proteksi, namun UI wajib menampilkan peringatan eksplisit.
-- `pinEnabled=true`: semua tab LOCKED wajib unlock via PIN (atau Master Code recovery bila PIN lupa).
+### 1.3 Komponen
+1. **Security Settings (menu Atur)** — status proteksi, aktifkan/ubah PIN, buat/ubah Master Code.
+2. **Credential Store** — envelope PBKDF2 saja; tanpa plaintext; tanpa hash custom.
+3. **Session Guard** — `view.unlocked` + idle 5 menit + visibility lock (§2, §3).
+4. **Rate Limiter** — counter + lockout epoch (§7-E).
+5. **Migration Layer** — deteksi legacy, langkah idempoten, commit atomik (§5).
+6. **Recovery Wizard** — alur recovery resumable dengan invariant tanpa-jalur-hilang (§2-D).
+
+### 1.4 Aturan akses & batas perlindungan (owner note 6)
+- `pinEnabled=false`: data owner **benar-benar belum terlindungi** — UI wajib menampilkan peringatan eksplisit di Atur & saat membuka tab owner ("Area owner belum dilindungi — siapa pun yang membuka perangkat ini dapat mengakses data ini"). Tab owner dapat dibuka untuk setup, tanpa PIN.
+- `pinEnabled=true`: **semua** akses owner wajib melewati guard autentikasi (PIN, atau Master Code bila PIN lupa). Tidak ada pengecualian tab.
+- **Rate limit lokal bukan perlindungan** terhadap pemilik perangkat yang dapat mengedit localStorage (lihat §7).
+- Aplikasi offline berbasis WebView **tidak setara** autentikasi server: tidak ada enforcement jarak jauh, tidak ada audit server, tidak ada pencabutan sesi pusat. Proteksi yang diberikan = **perlindungan kesempatan (opportunistic) terhadap akses kasual**, bukan terhadap penyerang yang menguasai perangkat.
 
 ---
 
 ## 2. Alur UI
 
 ### A. Setup PIN (pertama kali)
-1. Launch app → `S.pinEnabled=false` → tidak ada prompt PIN.
-2. Owner buka tab **Atur** → banner: "Area owner belum dilindungi — aktifkan PIN".
-3. Klik "Aktifkan PIN" → form masukkan PIN baru (4–6 angka, dikonfirmasi) → `pinEnabled=true`, hash disimpan.
-4. Setelah itu, semua tab owner wajib PIN.
+1. Launch → `pinEnabled=false` → **tanpa prompt PIN**.
+2. Atur → banner "belum dilindungi" → "Aktifkan PIN".
+3. Form PIN baru (4–6 angka, dikonfirmasi; anjurkan 6) → derive PBKDF2 async → simpan envelope → `pinEnabled=true`.
+4. Setelah aktif, semua tab owner wajib PIN. **Tidak ada** PIN default di langkah mana pun.
 
 ### B. Login (unlock)
-1. Klik tab LOCKED → modal `askPin()` (L377-383).
-2. Verifikasi PBKDF2(PIN, salt) vs `S.pinHash`.
-3. Sukses → `unlockTo(tab)` + mulai idle timer. Gagal → increment `pinFails`; lockout bila ≥5.
+1. Tab LOCKED → `askPin()` (L377-383) → verifikasi async PBKDF2.
+2. Sukses → `unlockTo(tab)` + idle timer mulai. Gagal → `pinFails++`; lockout bila ≥5 (30 detik; 3 siklus → 5 menit + sarankan recovery).
 
 ### C. Ganti PIN
-1. Atur → Ganti PIN (3 langkah: lama → baru → konfirmasi), sesuai `pinBoxHtml()` (L712-717).
-2. Verifikasi lama, validasi `okPin` (L784), simpan hash baru, reset `pinFails`.
+1. Atur → Ganti PIN (3 langkah: lama → baru → konfirmasi; `pinBoxHtml()` L712-717).
+2. Verifikasi lama async; validasi `okPin` (L784); simpan envelope baru; reset `pinFails`.
 
-### D. Recovery (Lupa PIN via Master Code)
-1. Modal PIN → "Lupa PIN? Pakai Master Code" (L382).
-2. Masukkan Master Code → verifikasi.
-3. Sukses → PIN direset ke default 1234 **DAN** `masterUsed=true` → UI wajib meminta owner membuat Master Code baru; Master Code lama dianggap **hangus** (rekomendasi paling aman: invalidate + rotasi wajib). Gagal 3× → lockout 60 detik.
+### D. Recovery PIN via Master Code (revisi utama — tanpa PIN default)
+Wizard **resumable**, state `S.recovery` tersimpan per langkah:
+1. Modal PIN → "Lupa PIN?" → form Master Code (min 12 karakter).
+2. Verifikasi async PBKDF2(master) == `S.master.hash`.
+3. **Verifikasi berhasil** → komit atomik: (a) `S.master` lama **langsung dihanguskan** (`S.master=null`, `masterUsed` tersimpan di riwayat wizard), (b) sistem **segera membuat envelope Master Code pengganti** dan menampilkannya sekali ke owner ("Simpan sekarang — tidak ditampilkan lagi"), (c) `S.recovery={active:true, step:2}`.
+4. Langkah 2: owner **membuat + mengonfirmasi PIN baru** (tanpa default) → derive PBKDF2 → `S.pin=envelope`, `pinEnabled=true`.
+5. Langkah 3: konfirmasi Master Code pengganti sudah disimpan (wajib sebelum area owner dibuka).
+6. Selesai → `S.recovery=null` → unlock.
+**Invariant anti-lockout:** pada setiap checkpoint yang tersimpan, selalu ada tepat satu jalur pemulihan aktif — sebelum langkah 3: Master lama masih valid; sesudah langkah 3: Master pengganti sudah aktif. Tidak ada state di mana PIN lama lupa + semua Master hangus.
+**Rotasi terputus:** bila aplikasi ditutup di tengah wizard, launch berikutnya mendeteksi `S.recovery.active` → wizard dilanjutkan dari `step` terakhir; PIN lama (bila lupa) tidak dipakai lagi, Master pengganti sudah aktif.
+**Rate limit:** Master 3× gagal → lockout 60 detik; berulang → 5 menit.
+
+### E. Rotasi Master Code (di Atur)
+Buat Master baru → verifikasi Master lama → komit hangus lama, aktif baru (atomic, dua envelope tidak pernah kosong bersamaan pada state tersimpan).
 
 ---
 
@@ -81,7 +103,7 @@ S.sessionStart    : number    // epoch ms saat unlock (opsional, audit)
 [Launch]
    |
    v
-pinEnabled=false? --ya--> Atur: banner "belum dilindungi" -> setup PIN -> pinEnabled=true
+pinEnabled=false? --ya--> Atur: banner "belum dilindungi" -> setup PIN (PBKDF2 async) -> pinEnabled=true
    | tidak
    v
 [Tab LOCKED diklik]
@@ -90,7 +112,7 @@ pinEnabled=false? --ya--> Atur: banner "belum dilindungi" -> setup PIN -> pinEna
 view.unlocked=true? --ya--> akses konten owner
    | tidak
    v
-askPin() -----> verifikasi PIN (PBKDF2)
+askPin() -----> verifikasi PBKDF2 async
    |               |
    | gagal         | sukses
    v               v
@@ -98,15 +120,18 @@ pinFails++     unlockTo(tab); mulai idleTimer(5 menit)
    |               |
    |>=5            | aktivitas user (pointer/key/touch) -> reset idleTimer
    v               |
-lockout 30 detik   |
-                   |--- idleTimer habis (5 menit) ---> lock()
-                   |--- visibilitychange hidden ----> lock()
-                   |--- visibilitychange visible ---> jika unlocked: lock() + askPin()
+lockout 30 detik   |--- idleTimer habis (5 menit) ---> lock()
+   |               |--- visibilitychange hidden ----> lock()
+   |(3 siklus)     |--- visible kembali -----------> lock() + askPin()
+   v
+lockout 5 menit + sarankan recovery
 
-lock(): view.unlocked=false; tutup modal; kembali ke tab kasir; clearInterval/listener
+lock(): view.unlocked=false; tutup modal; tab kasir; clearTimeout + hapus listener (anti timer ganda)
 
-[Recovery] askPin -> "Lupa PIN" -> masukkan Master Code
-   | verifikasi -> sukses: PIN=default(1234); masterUsed=true; wajib rotasi Master Code
+[Recovery wizard]
+askPin -> "Lupa PIN?" -> verifikasi Master (async, max 3x)
+   | sukses: hangus Master lama ATOMIK -> buat+tampilkan Master pengganti -> step 2: PIN baru -> step 3: konfirmasi simpan -> unlock
+   | tutup aplikasi di tengah: S.recovery aktif -> launch berikutnya lanjut wizard dari step terakhir
    | gagal 3x -> lockout 60 detik
 ```
 
@@ -114,92 +139,118 @@ lock(): view.unlocked=false; tutup modal; kembali ke tab kasir; clearInterval/li
 
 ## 4. Daftar File yang Perlu Diubah
 
-Hanya satu file aplikasi: **`Kasir Kopi (1).html`** (dokumen perencanaan ini tidak mengubahnya).
+Hanya satu file aplikasi: **`Kasir Kopi (1).html`** (dokumen ini tidak mengubahnya).
 
 | Area | Baris saat ini | Perubahan yang direncanakan |
 |---|---|---|
-| `KEY` storage | L151 | Tambahkan versi schema (`kasirkopi.v2`) untuk migrasi |
-| `LOCKED` | L152 | Pertahankan; tambahkan guard `pinEnabled` |
-| `hash()` custom | L160 | Ganti dengan PBKDF2 (Web Crypto); hapus fallback tidak aman |
-| `seed()` | L168-183 | Hapus default PIN/Master; tambahkan `pinEnabled:false`, field envelope |
-| `load()`/`migrate()` | L184-189, L495-498 | Tambah deteksi format lama + migrasi credential |
-| `go()` / `askPin()` / `unlockTo()` | L366-384 | Integrasi guard `pinEnabled`, idle timer, lock state |
-| `pinBoxHtml()` | L712-717 | Validasi kompleksitas PIN sesuai spesifikasi |
-| `vAtur()` | L718-729 | Tambah panel Security Settings (status proteksi, setup PIN, Master Code) |
-| `F.pin` / `master-reset` / `master` / `pinstep` | L786-832 | PBKDF2 verify, rotasi Master Code, reset counter |
-| Listener input/change | L836-864 | Reset idle timer pada aktivitas relevan |
-| `init()` | L868-873 | Register visibilitychange + idle timer; bersihkan listener |
+| `KEY` storage | L151 | Schema v2 (`kasirkopi.v2`) |
+| `LOCKED` | L152 | Pertahankan; tambah guard `pinEnabled` |
+| `hash()` custom | L160 | **Hapus**; ganti modul PBKDF2 async (Web Crypto); tanpa fallback custom |
+| `seed()` | L168-183 | Tanpa default PIN/Master; `pinEnabled:false`, envelope null, `schemaVersion:2` |
+| `load()`/`migrate()` | L184-189, L495-498 | Deteksi legacy + migrasi idempoten (§5) |
+| `go()` / `askPin()` / `unlockTo()` | L366-384 | Guard `pinEnabled`, idle/visibility lock, wizard recovery resumable |
+| `pinBoxHtml()` | L712-717 | Validasi PIN; async derive |
+| `vAtur()` | L718-729 | Panel Security Settings: status proteksi, setup/ubah PIN, buat/ubah Master (min 12), peringatan "belum dilindungi" |
+| `F.pin` / `master-reset` / `master` / `pinstep` | L786-832 | PBKDF2 verify async, wizard recovery, rotasi Master atomic, reset counter |
+| Listener input/change | L836-864 | Reset idle timer; cleanup listener |
+| `init()` | L868-873 | Probe Web Crypto (§6), register visibilitychange, lanjutkan wizard bila `S.recovery.active` |
 
 Dokumen pendukung (bukan kode aplikasi): `AUDIT_AUTHENTICATION.md`, `SECURITY_HARDENING_SPEC.md`.
 
 ---
 
-## 5. Strategi Migrasi Credential Lama
+## 5. Strategi Migrasi Credential Lama & Backup (revisi)
 
-1. **Deteksi:** pada `load()`, bila `S.pin` berupa string legacy (`h…-<len>`) dan `S.pinHash` belum ada → mode migrasi.
-2. **Tidak menghapus data lama:** field legacy tetap disimpan sementara; tidak ada reset database.
-3. **Transisi:** saat owner pertama kali berhasil masuk (PIN lama terverifikasi via hash legacy), sistem otomatis derive PBKDF2(PIN, salt baru) → tulis `pinHash/pinSalt/pinIter`, lalu hapus field legacy.
-4. **Backup/restore:** format JSON backup tetap kompatibel; restore membawa serta envelope credential baru bila ada, atau field legacy bila belum dimigrasi.
-5. **Rollback:** bila migrasi gagal, state tetap valid (legacy masih bisa dipakai) — tidak ada data loss.
+### 5.1 Migrasi legacy → PBKDF2 (idempoten, aman saat terputus)
+1. **Deteksi:** `load()` menemukan `S.pin` string legacy (`h…-<len>`) tanpa envelope → set `migrationStep=1`, **hanya baca** (tidak menulis).
+2. **Trigger:** owner berhasil unlock dengan PIN lama (verify legacy) → derive PBKDF2 async dengan salt baru → **satu kali `save()` atomik** menulis envelope + `migrationStep=done` + hapus field legacy.
+3. **Aplikasi ditutup / gagal di tengah jalan:** derive async belum selesai → tidak ada tulisan sama sekali; field legacy masih utuh; unlock berikutnya memakai legacy lagi (idempoten). Bila `save()` berhasil, legacy sudah dihapus — tidak ada state setengah jalan karena penulisan tunggal.
+4. **Data bisnis TIDAK disentuh:** migrasi hanya menangani key credential; `tx`, `ingredients`, `menu`, `operators`, `campaigns`, `customers`, `seq`, `shop` tidak pernah dihapus/direset — termasuk bila migrasi gagal total.
+5. **Fail closed:** bila Web Crypto tidak tersedia saat migrasi diperlukan → unlock diblokir dengan pesan eksplisit; data bisnis tetap terbaca via backup (§5.3).
 
----
+### 5.2 Backup JSON & envelope credential — keputusan
+- **Default: envelope credential TIDAK disertakan** dalam backup (`pin`, `master`, `recovery`, counter lockout dikecualikan). Restore = data bisnis pulih, credential wajib setup ulang via wizard (tidak ada PIN default untuk masuk).
+- **Opt-in:** bila owner memilih menyertakan envelope, UI wajib memperingatkan: file backup berisi hash+salt+iterasi → kebocoran file memungkinkan brute-force offline terhadap PIN 4–6 digit (entropi rendah) meski PBKDF2 600k memperlambat; dan **mengembalikan credential lama** (termasuk Master lama) yang mungkin sudah pernah dikompromikan.
+- **Restore tidak boleh menurunkan keamanan diam-diam:** restore envelope lama sementara state aktif lebih baru → konfirmasi eksplisit owner + setelah restore, sistem memaksa perubahan PIN & Master pada unlock berikutnya. Restore field legacy (bukan envelope) → konfirmasi + migrasi ulang otomatis. Restore `pinEnabled=false` sementara aktif `true` → konfirmasi downgrade + banner peringatan.
+- **Restore tidak valid** (schema mismatch/corrupt) → abort, state saat ini utuh, toast error; tidak ada reset data.
 
-## 6. Kompatibilitas Android WebView & Web Crypto
-
-- **Web Crypto API (`crypto.subtle`)** didukung penuh pada Android WebView berbasis Chrome 69+ (Android 9+ umumnya). Aplikasi Kasrr berbasis WebView offline-friendly → asumsikan modern WebView.
-- **PBKDF2** via `crypto.subtle.deriveBits` dengan HMAC-SHA-256, iterasi ≥ 100.000 (OWASP 2023 merekomendasikan 600.000 untuk SHA-256; 100k–600k masih praktis untuk PIN 4–6 digit pada perangkat mobile; pilih 100.000 sebagai keseimbangan UX/offline, dokumentasikan).
-- **Async:** semua derive bersifat async → UI modal harus mendukung `await`; tidak boleh fallback sinkron ke hash custom (owner: "Jangan membuat fallback ke hash buatan sendiri yang tidak aman").
-- **Bila `crypto.subtle` tidak tersedia:** fail closed — blokir setup PIN/Master Code dengan pesan "Perangkat tidak mendukung penyimpanan credential aman"; jangan turun ke hash tidak aman.
-- **Secure context:** `crypto.subtle` butuh HTTPS/localhost; APK WebView memuat file lokal → umumnya `file://` diizinkan di WebView, tetapi perlu verifikasi pada build APK.
-
----
-
-## 7. Risiko Keamanan yang Masih Tersisa
-
-1. **PIN numerik 4–6 digit** = entropi rendah; offline brute-force pada perangkat yang sudah dikuasai attacker tetap memungkinkan (localStorage dapat dibaca/ditulis). PBKDF2 memperlambat, tidak menghilangkan risiko.
-2. **Rate limiting lokal** dapat dimanipulasi oleh pemilik perangkat (clear storage / edit state). Tidak ada enforcement server.
-3. **XSS via UI** (mis. input nama toko/operator yang di-render via `esc()` L154, tetapi input di L721-724) — jika XSS berhasil, credential envelope dapat dibaca.
-4. **Tidak ada audit log server**; semua log lokal (jika ada) dapat dihapus.
-5. **WebView lawas** tanpa Web Crypto → fitur keamanan tidak aktif (fail closed, tapi fungsionalitas hilang).
-6. **Master Code rotation wajib** bila owner mengabaikan UI → akun tetap dengan master yang sudah terpakai (mitigasi: UI memaksa rotasi sebelum unlock berikutnya).
+### 5.3 Jaminan kompatibilitas
+Transaksi, stok, menu, operator, laporan, riwayat shift: tidak berubah format; backup/restore JSON tetap berfungsi untuk semua key bisnis pada schema v2.
 
 ---
 
-## 8. Test Plan & Acceptance Criteria
+## 6. Verifikasi Web Crypto pada APK WebIntoApp Sebenarnya (owner note 5)
+
+**Jangan mengasumsikan ketersediaan dari versi Android.** Sebelum implementasi credential, jalankan probe pada APK WebIntoApp yang benar digunakan:
+
+| Probe | Langkah | Kriteria lulus |
+|---|---|---|
+| `crypto.getRandomValues` | Panggil untuk 16 byte | Tidak throw; entropy tampak acak |
+| `crypto.subtle` ada | `typeof crypto.subtle !== 'undefined'` pada konteks WebView APK (bukan Chrome desktop) | true |
+| PBKDF2 roundtrip | `importKey` → `deriveBits` (SHA-256, 600k, salt 16B) → `exportKey`/verify dua PIN berbeda | Hash konsisten & berbeda antar input; waktu derive terukur |
+| Penyimpanan hasil | Simpan envelope ke localStorage APK → reload → verifikasi ulang | Envelope terbaca & verify sukses |
+| Benchmark performa | Ukur waktu derive PBKDF2 600k pada perangkat target | ≤ 1,0 detik; bila lebih → eskalasi ke owner (angka ukur), **tanpa downgrade otomatis** |
+
+**Bila gagal satu pun → fail closed:** setup PIN/Master diblokir, area owner tidak dapat dibuka (termasuk recovery), hanya tab kasir yang berfungsi; tampilkan pesan eksplisit ("Perangkat/WebView ini tidak mendukung penyimpanan credential aman") + konsekuensi: fitur owner (rekap/stok/atur, end shift) tidak tersedia sampai perangkat/WebView memenuhi syarat. **Tidak ada fallback hash custom.**
+
+---
+
+## 7. Risiko Keamanan yang Masih Tersisa (laporan ulang)
+
+1. **PIN numerik 4–6 digit** = entropi rendah; serangan brute-force offline tetap mungkin bila penyimpanan perangkat disalin (PBKDF2 600k memperlambat, tidak menghapus risiko). Mitigasi terdekat: anjurkan PIN 6 angka.
+2. **Rate limit lokal dapat dimanipulasi** pemilik perangkat (edit `pinFails`/`pinLockUntil`/`pinEnabled`/hash di localStorage) — bukan kontrol keamanan terhadap attacker yang menguasai perangkat.
+3. **Offline WebView ≠ autentikasi server:** tidak ada enforcement/audit/revocation pusat; proteksi bersifat kesempatan terhadap akses kasual.
+4. **Backup opt-in berisi envelope** → kebocoran file backup memperluas surface brute-force offline & mengembalikan credential lama (§5.2).
+5. **Tamper state** (mis. `pinEnabled` diubah true/false manual) → aplikasi wajib fail closed (kunci + wizard setup ulang), tidak crash; uji T20.
+6. **XSS via input UI** (nama toko/operator, L721-724) bila terjadi → envelope credential dapat dibaca; `esc()` (L154) membantu namun bukan jaminan.
+7. **WebView lawas / WebIntoApp tanpa Web Crypto** → fitur keamanan tidak aktif (fail closed; fungsionalitas owner hilang, §6).
+8. **Master Code lupa + PIN lupa** → data tidak dapat dipulihkan (by design, tanpa backdoor); owner wajib menyimpan Master pengganti saat wizard recovery (langkah 3).
+
+---
+
+## 8. Test Plan & Acceptance Criteria (T1–T20)
 
 | # | Test | Acceptance Criteria |
 |---|---|---|
-| T1 | Launch pertama | Tidak ada prompt PIN; Atur terbuka; banner "belum dilindungi" tampil |
-| T2 | Setup PIN via Atur | PIN aktif; `pinEnabled=true`; tab owner kini wajib PIN |
+| T1 | Launch pertama | Tanpa prompt PIN; Atur terbuka; banner "belum dilindungi" tampil |
+| T2 | Setup PIN via Atur | PIN aktif; `pinEnabled=true`; tab owner kini wajib PIN; hash = envelope PBKDF2 (bukan legacy) |
 | T3 | Login PIN benar | Unlock berhasil; idle timer mulai |
-| T4 | Login PIN salah 5× | Lockout 30 detik; UI menampilkan hitungan |
+| T4 | Login PIN salah 5× | Lockout 30 detik; UI hitungan; 3 siklus → 5 menit |
 | T5 | Idle 5 menit | Otomatis lock; kembali ke kasir; unlock wajib PIN |
 | T6 | App background / device lock | Langsung lock; visible kembali → re-lock + minta PIN |
 | T7 | Ganti PIN (3 langkah) | PIN lama salah → gagal; PIN baru valid → sukses; `pinFails` reset |
-| T8 | Recovery Master Code | Master benar → PIN reset 1234; `masterUsed=true`; UI memaksa rotasi Master Code |
+| T8 | Recovery Master Code | **Tanpa PIN default:** wizard meminta PIN baru (buat+konfirmasi); Master lama hangus; Master pengganti wajib dibuat/disimpan sebelum owner area terbuka |
 | T9 | Master Code salah 3× | Lockout 60 detik |
-| T10 | Migrasi credential lama | Legacy PIN masih bisa dipakai sekali; setelah itu envelope baru aktif; data transaksi/stok/menu/operator/laporan tidak hilang |
-| T11 | Backup/restore JSON | Restore berhasil; credential envelope tetap valid; format lama tetap dapat dipulihkan |
-| T12 | Kompatibilitas WebView | PBKDF2 berjalan; bila `crypto.subtle` tidak ada → setup PIN diblokir (fail closed) |
+| T10 | Migrasi credential lama | Legacy PIN dapat dipakai untuk unlock pertama → envelope baru aktif; legacy terhapus; data bisnis utuh |
+| T11 | Backup/restore JSON | Restore berhasil; tanpa envelope → wizard setup credential; dengan envelope (opt-in) → konfirmasi + paksa ubah PIN/Master; tidak ada penurunan keamanan diam-diam |
+| T12 | Kompatibilitas WebView | PBKDF2 jalan; `crypto.subtle` tidak ada → setup PIN diblokir (fail closed) |
+| T13 | Recovery tanpa PIN default | Tidak ada kode path yang menulis/menerima PIN 1234 atau string default; recovery selalu membuat PIN baru |
+| T14 | Master lama tidak dapat dipakai ulang | Setelah recovery sukses, Master lama pasti gagal verify (single-use) |
+| T15 | Rotasi Master terputus | Tutup aplikasi di tiap langkah wizard → launch lanjut dari step terakhir; tidak ada state tanpa jalur pemulihan aktif; data bisnis utuh |
+| T16 | Migrasi gagal / aplikasi ditutup saat migrasi | Kill mid-derive → reload: legacy masih valid (idempoten) atau envelope lengkap; tidak ada setengah jalan; data bisnis tidak hilang |
+| T17 | Restore backup lama & baru | Backup legacy → konfirmasi + migrasi ulang; backup v2 → envelope valid; konfirmasi eksplisit untuk downgrade/apapun yang menurunkan keamanan |
+| T18 | Web Crypto tidak tersedia | Simulasi absence → fail closed: owner area diblokir, kasir tetap jalan, pesan eksplisit; tanpa fallback hash custom |
+| T19 | Background / screen lock / foreground | Lock on hidden; re-lock on visible; idle reset pada aktivitas relevan; **tidak ada timer ganda** (satu `idleTimer` aktif) |
+| T20 | Tamper localStorage | Edit manual `pinEnabled`/hash/counter lockout → aplikasi fail closed (kunci/wizard setup ulang), tidak crash, data bisnis utuh; dokumen bahwa tamper device-owner di luar cakupan |
 
 ---
 
 ## 9. Estimasi Urutan Implementasi per Subtask
 
+0. **Verifikasi Web Crypto pada APK WebIntoApp** (probe + benchmark, §6) — gate sebelum semua pekerjaan credential; ~0.5 hari.
 1. **A. Setup PIN** (state `pinEnabled`, UI Atur, guard LOCKED) — fondasi; ~0.5–1 hari.
-2. **C. Penyimpanan credential** (PBKDF2 + envelope + migrasi legacy) — prasyarat B/D/E; ~1–1.5 hari.
-3. **B. Master Code recovery** (buat/ubah/rotasi, validasi, `masterUsed`) — ~0.5–1 hari.
+2. **C. Penyimpanan credential** (PBKDF2 async + envelope + migrasi legacy idempoten) — prasyarat B/D/E; ~1–1.5 hari.
+3. **B. Master Code recovery** (min 12 karakter, wizard resumable, rotasi atomic, single-use) — ~0.5–1 hari.
 4. **D. Penguncian otomatis** (idle 5 menit, visibility lock, cleanup listener) — ~0.5 hari.
 5. **E. Rate limiting** (counter + lockout PIN/Master) — ~0.5 hari.
-6. **F. Kompatibilitas & migrasi backup/restore** (format v2, uji restore) — ~0.5–1 hari.
-7. **Test plan (T1–T12) + bugfix** — ~1 hari.
+6. **F. Kompatibilitas & migrasi backup/restore** (schema v2, policy envelope, konfirmasi restore) — ~0.5–1 hari.
+7. **Test plan (T1–T20) + bugfix** — ~1–1.5 hari.
 
-**Total estimasi:** 4–6.5 hari kerja, tergantung kompleksitas UI WebView.
+**Total estimasi:** 5–7 hari kerja, tergantung hasil benchmark WebView target.
 
 ---
 
 ## Catatan Akhir
-
 - Dokumen ini **evaluatif & perencanaan**; tidak ada kode aplikasi yang diubah.
 - Branch `main` tidak diubah; tidak ada merge; tidak ada migrasi data.
-- Implementasi menunggu persetujuan owner atas spesifikasi ini.
+- Implementasi menunggu persetujuan owner atas revisi spesifikasi ini.
