@@ -8,6 +8,7 @@
 | Revisi | Perubahan utama | Alasan teknis |
 |---|---|---|
 | R1 (ini) | Recovery PIN tanpa PIN default; rotasi Master Code wajib & atomic; Master Code min 12 karakter; parameter PBKDF2 final (600k iterasi, salt 16B, async-only); strategi migrasi idempoten + backup envelope policy; verifikasi Web Crypto pada APK WebIntoApp sebenarnya; batas perlindungan & threat model; tambahan uji T13–T20 | Menutup celah lockout & PIN bawaan, menghilangkan ambiguity parameter, memenuhi batasan offline/WebView, memperkuat jaminan tidak ada data bisnis hilang. |
+| R2 | Recovery wizard diperbaiki: hapus invalidasi prematur Master Code; alur baru = verifikasi Master lama → buat Master baru → buat PIN baru → verifikasi kedua credential → **atomic commit** → unlock. Invariant anti-lockout diperketat (Master lama tetap valid sampai commit sukses). | Owner menemukan kritik: desain sebelumnya menyimpan Master pengganti yang hanya ditampilkan sekali → kehilangan satu-satunya jalur pemulihan bila ditutup sebelum commit. Desain baru menghapus auto-generate one-shot. |
 
 ---
 
@@ -36,13 +37,13 @@
 | Fallback hash custom | **DILARANG** | Bila Web Crypto tidak tersedia → fail closed (owner area diblokir), bukan turun ke hash tidak aman. |
 | Sinkron vs async | Semua derive/verify **async** (`await`) | `crypto.subtle` intrinsik async; UI modal wajib menunggu tanpa membekukan event loop. |
 
-### 1.2 Envelope credential (disimpan di `S`, localStorage)
+### 1.2 Envelope credential (disimpan di `S`, localStorage) — desain R2
 ```
 S.schemaVersion   : 2
 S.pinEnabled      : boolean        // false = belum dilindungi (belum ada PIN aktif)
 S.pin             : { hash, salt, iter } | null   // PBKDF2 envelope; null bila pinEnabled=false
 S.master          : { hash, salt, iter } | null   // null = belum dibuat / sudah hangus
-S.recovery        : { active:boolean, step:number } | null  // wizard recovery berjalan
+S.recovery        : { step:number, masterPending?:{hash,salt,iter}, pinPending?:{hash,salt,iter}, masterVerified?:boolean, pinVerified?:boolean } | null  // wizard recovery R2: Master LAMA valid sampai atomic commit sukses
 S.pinFails, S.pinLockUntil, S.masterFails, S.masterLockUntil : number
 S.lastActive, S.sessionStart : number
 ```
@@ -80,20 +81,25 @@ Field legacy (`S.pin` string `h…-<len>`, `S.master` string) **hanya** ada sebe
 1. Atur → Ganti PIN (3 langkah: lama → baru → konfirmasi; `pinBoxHtml()` L712-717).
 2. Verifikasi lama async; validasi `okPin` (L784); simpan envelope baru; reset `pinFails`.
 
-### D. Recovery PIN via Master Code (revisi utama — tanpa PIN default)
-Wizard **resumable**, state `S.recovery` tersimpan per langkah:
-1. Modal PIN → "Lupa PIN?" → form Master Code (min 12 karakter).
-2. Verifikasi async PBKDF2(master) == `S.master.hash`.
-3. **Verifikasi berhasil** → komit atomik: (a) `S.master` lama **langsung dihanguskan** (`S.master=null`, `masterUsed` tersimpan di riwayat wizard), (b) sistem **segera membuat envelope Master Code pengganti** dan menampilkannya sekali ke owner ("Simpan sekarang — tidak ditampilkan lagi"), (c) `S.recovery={active:true, step:2}`.
-4. Langkah 2: owner **membuat + mengonfirmasi PIN baru** (tanpa default) → derive PBKDF2 → `S.pin=envelope`, `pinEnabled=true`.
-5. Langkah 3: konfirmasi Master Code pengganti sudah disimpan (wajib sebelum area owner dibuka).
-6. Selesai → `S.recovery=null` → unlock.
-**Invariant anti-lockout:** pada setiap checkpoint yang tersimpan, selalu ada tepat satu jalur pemulihan aktif — sebelum langkah 3: Master lama masih valid; sesudah langkah 3: Master pengganti sudah aktif. Tidak ada state di mana PIN lama lupa + semua Master hangus.
-**Rotasi terputus:** bila aplikasi ditutup di tengah wizard, launch berikutnya mendeteksi `S.recovery.active` → wizard dilanjutkan dari `step` terakhir; PIN lama (bila lupa) tidak dipakai lagi, Master pengganti sudah aktif.
-**Rate limit:** Master 3× gagal → lockout 60 detik; berulang → 5 menit.
+### D. Recovery PIN via Master Code (desain R2 — tanpa PIN default, tanpa one-shot Master Code)
+Wizard **resumable**. Langkah utama (owner-side, tanpa PIN default, tanpa auto-generate one-shot):
+1. **Verifikasi Master Code lama.** Owner memasukkan Master Code → verifikasi async PBKDF2 == `S.master.hash` → **tanpa commit** (Master Code lama tetap valid; `S.recovery.step=1` disimpan). Gagal 3× → lockout 60 detik.
+2. **Buat & konfirmasi Master Code pengganti.** Owner memasukkan & mengonfirmasi Master Code baru (min 12 karakter) → derive PBKDF2 async → envelope disimpan di `S.recovery.masterPending` (hanya envelope, tidak ada plaintext). Master Code lama **masih valid** dan belum dikonsumsi.
+3. **Buat & konfirmasi PIN baru.** Owner memasukkan & mengonfirmasi PIN baru (4–6 angka, usul 6 angka; tanpa default) → derive PBKDF2 async → envelope disimpan di `S.recovery.pinPending`.
+4. **Verifikasi kedua credential baru.** Sistem memverifikasi `masterPending` dan `pinPending` dengan PBKDF2 (cocokkan input owner vs envelope pending).
+5. **Satu atomic commit.** `save()` menulis sekaligus: `S.pin = pinPending`, `S.master = masterPending`, `pinEnabled = true`, `S.recovery = null`. Pada **kesuksesan**: Master Code lama **wajib gagal** diverifikasi (pointing ke envelope baru). Pada **kegagalan penyimpanan**: state lama dikembalikan, Master Code lama tetap valid, data bisnis tidak berubah, owner dapat retry.
+6. **Setelah commit sukses**, owner boleh unlock area owner (via PIN baru atau Master Code baru).
 
-### E. Rotasi Master Code (di Atur)
-Buat Master baru → verifikasi Master lama → komit hangus lama, aktif baru (atomic, dua envelope tidak pernah kosong bersamaan pada state tersimpan).
+**Mekanisme & invarian (R2):**
+- Master Code lama valid sampai atomic commit sukses — tidak di-hanguskan prematur.
+- Tidak ada Master Code/PIN yang disimpan dalam plaintext secara permanen (hanya envelope PBKDF2 di state level maupun wizard pending).
+- Jika aplikasi ditutup sebelum langkah commit → recovery dapat dilanjutkan **dengan Master Code lama** (belum dikonsumsi) dari checkpoint terakhir.
+- Jika commit gagal → state lama utuh dan valid, data bisnis tidak diubah.
+- Jika commit sukses → Master Code lama wajib gagal diverifikasi; Master baru + PIN baru valid.
+- Master Code pengganti dibuat & dikonfirmasi owner sendiri; tidak ada sistem yang membuat kode "hanya ditampilkan sekali".
+
+### E. Rotasi Master Code (di Atur) — konsisten dengan R2
+Buat Master baru (min 12 karakter) → owner mengonfirmasi → verifikasi Master lama → **atomic commit** (Master baru + envelope terkait) → hangus Master lama. Prinsip yang sama dengan wizard recovery §2-D: Master lama valid sampai commit sukses.
 
 ---
 
@@ -128,11 +134,14 @@ lockout 5 menit + sarankan recovery
 
 lock(): view.unlocked=false; tutup modal; tab kasir; clearTimeout + hapus listener (anti timer ganda)
 
-[Recovery wizard]
-askPin -> "Lupa PIN?" -> verifikasi Master (async, max 3x)
-   | sukses: hangus Master lama ATOMIK -> buat+tampilkan Master pengganti -> step 2: PIN baru -> step 3: konfirmasi simpan -> unlock
-   | tutup aplikasi di tengah: S.recovery aktif -> launch berikutnya lanjut wizard dari step terakhir
-   | gagal 3x -> lockout 60 detik
+[Recovery wizard R2]
+askPin -> "Lupa PIN?" -> [1] verifikasi Master LAMA (async, max 3x; tanpa commit; Master LAMA tetap valid)
+   | verifikasi gagal -> wizard balik ke [1]; >=3 gagal -> lockout 60 detik
+   | verifikasi sukses -> [2] buat+konfirmasi Master BARU (min 12) -> [3] buat+konfirmasi PIN BARU -> [4] verifikasi kedua credential baru (Master BARU, PIN BARU) -> [5] atomic commit (tulis PIN BARU + Master BARU; hangus Master LAMA) -> [6] unlock
+   | [5] commit sukses -> Master LAMA wajib gagal; Master BARU & PIN BARU valid; S.recovery=null
+   | [5] commit gagal -> state lama valid (Master LAMA, belum dikonsumsi); data bisnis tidak berubah
+   | tutup aplikasi sebelum [5] -> S.recovery aktif; Master LAMA masih valid -> resume verifikasi dari checkpoint langkah terakhir
+   | gagal verifikasi (Master/PIN) -> wizard kembali ke langkah terkait
 ```
 
 ---
@@ -219,19 +228,22 @@ Transaksi, stok, menu, operator, laporan, riwayat shift: tidak berubah format; b
 | T5 | Idle 5 menit | Otomatis lock; kembali ke kasir; unlock wajib PIN |
 | T6 | App background / device lock | Langsung lock; visible kembali → re-lock + minta PIN |
 | T7 | Ganti PIN (3 langkah) | PIN lama salah → gagal; PIN baru valid → sukses; `pinFails` reset |
-| T8 | Recovery Master Code | **Tanpa PIN default:** wizard meminta PIN baru (buat+konfirmasi); Master lama hangus; Master pengganti wajib dibuat/disimpan sebelum owner area terbuka |
+| T8 | Recovery Master Code (R2) | Tanpa PIN default; verifikasi Master lama → owner buat Master BARU + PIN BARU → verifikasi kedua → **atomic commit** → Master LAMA hangus; wajib buat Master BARU sebelum owner area dibuka; Master LAMA valid sampai commit sukses |
 | T9 | Master Code salah 3× | Lockout 60 detik |
 | T10 | Migrasi credential lama | Legacy PIN dapat dipakai untuk unlock pertama → envelope baru aktif; legacy terhapus; data bisnis utuh |
 | T11 | Backup/restore JSON | Restore berhasil; tanpa envelope → wizard setup credential; dengan envelope (opt-in) → konfirmasi + paksa ubah PIN/Master; tidak ada penurunan keamanan diam-diam |
 | T12 | Kompatibilitas WebView | PBKDF2 jalan; `crypto.subtle` tidak ada → setup PIN diblokir (fail closed) |
-| T13 | Recovery tanpa PIN default | Tidak ada kode path yang menulis/menerima PIN 1234 atau string default; recovery selalu membuat PIN baru |
-| T14 | Master lama tidak dapat dipakai ulang | Setelah recovery sukses, Master lama pasti gagal verify (single-use) |
-| T15 | Rotasi Master terputus | Tutup aplikasi di tiap langkah wizard → launch lanjut dari step terakhir; tidak ada state tanpa jalur pemulihan aktif; data bisnis utuh |
+| T13 | Recovery tanpa PIN default | Tidak ada kode path yang menulis/menerima PIN 1234; recovery selalu membuat PIN baru via wizard (create+confirm) |
+| T14 | Master lama tidak dapat dipakai ulang | Setelah recovery sukses, Master lama wajib gagal verifikasi (single-use, envelope diganti) |
+| T15 | Recovery terputus (app ditutup sebelum commit) | Tutup di tiap langkah wizard → resume pakai Master LAMA (masih valid); tidak ada state tanpa jalur pemulihan aktif; data bisnis utuh; Master pengganti tidak ditampilkan sekali-saja |
 | T16 | Migrasi gagal / aplikasi ditutup saat migrasi | Kill mid-derive → reload: legacy masih valid (idempoten) atau envelope lengkap; tidak ada setengah jalan; data bisnis tidak hilang |
 | T17 | Restore backup lama & baru | Backup legacy → konfirmasi + migrasi ulang; backup v2 → envelope valid; konfirmasi eksplisit untuk downgrade/apapun yang menurunkan keamanan |
 | T18 | Web Crypto tidak tersedia | Simulasi absence → fail closed: owner area diblokir, kasir tetap jalan, pesan eksplisit; tanpa fallback hash custom |
 | T19 | Background / screen lock / foreground | Lock on hidden; re-lock on visible; idle reset pada aktivitas relevan; **tidak ada timer ganda** (satu `idleTimer` aktif) |
 | T20 | Tamper localStorage | Edit manual `pinEnabled`/hash/counter lockout → aplikasi fail closed (kunci/wizard setup ulang), tidak crash, data bisnis utuh; dokumen bahwa tamper device-owner di luar cakupan |
+| T21 | Tutup aplikasi pada tiap langkah wizard recovery | Setelah tutup sebelum commit: S.recovery aktif & Master LAMA masih valid; resume lanjut dari checkpoint; tidak ada plaintext permanen |
+| T22 | Kegagalan penyimpanan saat commit | Commit gagal → state lama dikembalikan; Master LAMA tetap valid; data bisnis tidak berubah; owner dapat retry |
+| T23 | Commit recovery sukses | Master LAMA wajib gagal verifikasi; Master BARU & PIN BARU valid; owner area unlockable setelah commit |
 
 ---
 
@@ -244,13 +256,14 @@ Transaksi, stok, menu, operator, laporan, riwayat shift: tidak berubah format; b
 4. **D. Penguncian otomatis** (idle 5 menit, visibility lock, cleanup listener) — ~0.5 hari.
 5. **E. Rate limiting** (counter + lockout PIN/Master) — ~0.5 hari.
 6. **F. Kompatibilitas & migrasi backup/restore** (schema v2, policy envelope, konfirmasi restore) — ~0.5–1 hari.
-7. **Test plan (T1–T20) + bugfix** — ~1–1.5 hari.
+7. **Test plan (T1–T23) + bugfix** — ~1,5–2 hari.
 
-**Total estimasi:** 5–7 hari kerja, tergantung hasil benchmark WebView target.
+**Total estimasi:** 5,5–7,5 hari kerja, tergantung hasil benchmark WebView target.
 
 ---
 
 ## Catatan Akhir
 - Dokumen ini **evaluatif & perencanaan**; tidak ada kode aplikasi yang diubah.
 - Branch `main` tidak diubah; tidak ada merge; tidak ada migrasi data.
+- Revisi R2 difokuskan pada §2-D (recovery wizard), §1.2 (state), §2-E (rotasi), §3 (diagram), dan §8 (test T8/T15/T21–T23) agar konsisten terhadap invariant anti-lockout baru.
 - Implementasi menunggu persetujuan owner atas revisi spesifikasi ini.
