@@ -443,7 +443,7 @@ function unlockTo(tab){view.unlocked=true;view.tab=tab;closeModal();render()}
 /* ============ Recovery R2 Wizard ============ */
 function recoveryStart(){
   if(!S.master){toast('Master Code belum dibuat. Buat Master Code di menu Atur.');return;}
-  S.recovery={step:1,masterPending:null,pinPending:null,masterFails:0,masterLockUntil:0};
+  S.recovery={step:1,masterPending:null,pinPending:null};
   save();
   recoveryModal();
 }
@@ -1002,8 +1002,13 @@ const F={
       S.masterVerified=false;
       if(save()){toast('Master Code disimpan');render();}else{rollbackState();toast('Gagal menyimpan Master Code',true);}
     }else if(!S.masterVerified){
-      if(await verifyEnvelope(m,S.master)){S.masterVerified=true;save();toast('Master Code diverifikasi');render();}
-      else{toast('Master Code salah',true);}
+      if(S.masterLockUntil&&Date.now()<S.masterLockUntil){toast('Terkunci. Coba lagi nanti.',true);return;}
+      if(await verifyEnvelope(m,S.master)){S.masterVerified=true;S.masterFails=0;S.masterLockUntil=0;save();toast('Master Code diverifikasi');render();}
+      else{
+        S.masterFails=(S.masterFails||0)+1;
+        if(S.masterFails>=3){S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();toast('Terlalu banyak percobaan. Terkunci 60 detik.',true);return;}
+        save();toast('Master Code salah',true);
+      }
     }
   },
   pinstep:async f=>{
@@ -1027,19 +1032,19 @@ const F={
     const err=m=>{$('#reErr').innerHTML='<div class="note err">'+esc(m)+'</div>'};
     if(step===1){
       /* Verify old Master Code */
-      if(S.recovery.masterLockUntil&&Date.now()<S.recovery.masterLockUntil){
+      if(S.masterLockUntil&&Date.now()<S.masterLockUntil){
         return err('Terkunci. Coba lagi nanti.');
       }
       const mc=f.mc.value;
       if(await verifyEnvelope(mc,S.master)){
-        S.recovery.masterFails=0;S.recovery.masterLockUntil=0;
+        S.masterFails=0;S.masterLockUntil=0;
         /* Advance to first incomplete step */
         S.recovery.step=!S.recovery.masterPending?2:(!S.recovery.pinPending?3:4);
         save();recoveryModal();
       }else{
-        S.recovery.masterFails=(S.recovery.masterFails||0)+1;
-        if(S.recovery.masterFails>=3){
-          S.recovery.masterFails=0;S.recovery.masterLockUntil=Date.now()+60000;save();
+        S.masterFails=(S.masterFails||0)+1;
+        if(S.masterFails>=3){
+          S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();
           return err('Terlalu banyak percobaan. Terkunci 60 detik.');
         }
         save();err('Master Code salah.');
@@ -1113,7 +1118,7 @@ document.addEventListener('change',e=>{
         if(legacy){
           confirmBox('Backup ini tidak berisi kredensial terenkripsi. Data bisnis akan dipulihkan, namun PIN & Master Code harus diatur ulang. Lanjutkan?',()=>{S=migrate(o);clearCreds();save();toast('Data dipulihkan - kredensial wajib diatur ulang');render();},'Pulihkan tanpa kredensial');
         }else if(hasEnvelope){
-          confirmBox('Backup ini berisi kredensial terenkripsi (hash+salt+iterasi). Risiko kebocoran jika file didapat orang lain. PIN/Master lama mungkin pernah dikompromikan. Lanjutkan?',()=>{S=migrate(o);clearCreds();save();/* Anti-downgrade: restored envelope treated as stale - force credential rotation */S.pin=null;S.master=null;S.pinEnabled=false;S.recovery=null;S.pinFails=0;S.pinLockUntil=0;S.masterFails=0;S.masterLockUntil=0;save();render();askPin('Setelah restore, atur PIN & Master baru via wizard recovery');},'Batal - atur ulang kredensial');
+          confirmBox('Backup ini berisi kredensial terenkripsi (hash+salt+iterasi). Risiko kebocoran jika file didapat orang lain. PIN/Master lama mungkin pernah dikompromikan. Lanjutkan?',()=>{S=migrate(o);clearCreds();save();render();askPin('Setelah restore, atur PIN & Master baru via wizard recovery');},'Batal - atur ulang kredensial');
         }else{
           confirmBox('Format cadangan tidak dikenali. Data bisnis dipulihkan, kredensial harus diatur ulang?',()=>{S=migrate(o);clearCreds();save();toast('Data dipulihkan - kredensial wajib diatur ulang');render();askPin('Masukkan PIN baru untuk melanjutkan');},'Batal');
         }
@@ -1136,8 +1141,6 @@ function init(){
   if(S.recovery){
     /* Resume: force re-verify old Master Code (no permanent masterVerified authorization). */
     S.recovery.step=1;
-    if(S.recovery.masterFails===undefined)S.recovery.masterFails=0;
-    if(S.recovery.masterLockUntil===undefined)S.recovery.masterLockUntil=0;
     render();
     recoveryModal();
   }
