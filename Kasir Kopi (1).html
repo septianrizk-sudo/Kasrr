@@ -148,7 +148,7 @@ textarea{width:100%;min-height:140px;border:1px solid var(--line);border-radius:
 
 <script>
 /* ============ Util & data ============ */
-const KEY='kasirkopi.v1';
+const KEY='kasirkopi.v2';
 const LOCKED=['rekap','stok','atur'];
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -157,7 +157,32 @@ const nf=n=>Number(n).toLocaleString('id-ID',{maximumFractionDigits:2});
 const rp=n=>'Rp '+Math.round(n).toLocaleString('id-ID');
 const r2=n=>Math.round(n*100)/100;
 const num=v=>{const x=parseFloat(String(v).replace(',','.'));return isFinite(x)&&x>0?x:0};
-function hash(s){let x=5381;for(const c of String(s))x=((x*33)^c.charCodeAt(0))>>>0;return 'h'+x.toString(36)+'-'+String(s).length}
+/* ---- Web Crypto PBKDF2 (async, no fallback) ---- */
+const PBKDF2_ITER=600000;
+const PBKDF2_SALT_BYTES=16;
+const PBKDF2_HASH_LEN=32;
+async function derivePBKDF2(pin,salt){
+  const enc=new TextEncoder();
+  const key=await crypto.subtle.importKey('raw',enc.encode(pin),{name:'PBKDF2'},false,['deriveBits']);
+  return crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations:PBKDF2_ITER},key,PBKDF2_HASH_LEN*8);
+}
+function b64url(buf){return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
+function b64urlToBytes(str){const pad='='.repeat((4-str.length%4)%4);return Uint8Array.from(atob(str.replace(/-/g,'+').replace(/_/g,'/')+pad),c=>c.charCodeAt(0))};
+async function makeEnvelope(pin){
+  const salt=crypto.getRandomValues(new Uint8Array(PBKDF2_SALT_BYTES));
+  const hash=await derivePBKDF2(pin,salt);
+  return {hash:b64url(hash),salt:b64url(salt),iter:PBKDF2_ITER};
+}
+async function verifyEnvelope(pin,env){
+  if(!env||!env.hash||!env.salt)return false;
+  const salt=b64urlToBytes(env.salt);
+  const hash=await derivePBKDF2(pin,salt);
+  return b64url(hash)===env.hash;
+}
+
+/* ---- Legacy hash (for migration only) ---- */
+function legacyHash(s){let x=5381;for(const c of String(s))x=((x*33)^c.charCodeAt(0))>>>0;return 'h'+x.toString(36)+'-'+String(s).length}
+
 const p2=n=>String(n).padStart(2,'0');
 const dkey=ts=>{const d=new Date(ts);return d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate())};
 const hm=ts=>{const d=new Date(ts);return p2(d.getHours())+':'+p2(d.getMinutes())};
@@ -167,7 +192,8 @@ const isCrit=i=>i.stock<=i.min;
 
 function seed(){
   const kopi=uid(),air=uid(),gula=uid(),susu=uid(),es=uid();
-  return {v:1,seq:0,shop:'Kopi Kita',rewardAt:10,pin:hash('1234'),master:hash('888888'),pinDefault:true,masterDefault:true,
+  return {v:2,seq:0,shop:'Kopi Kita',rewardAt:10,pinEnabled:false,pin:null,master:null,recovery:null,
+    pinFails:0,pinLockUntil:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,
     operators:[{id:uid(),name:'Kasir Pagi'},{id:uid(),name:'Kasir Sore'}],
     ingredients:[
       {id:kopi,name:'Biji kopi',unit:'g',stock:1500,min:300},
@@ -181,12 +207,37 @@ function seed(){
       {id:uid(),name:'Americano',price:14000,cup:true,recipe:[{ing:kopi,qty:18},{ing:air,qty:200},{ing:es,qty:90}]}],
     customers:{},tx:[],op:'',campaigns:[{id:uid(),name:'Gratis 1 cup',cost:10,type:'free',menuId:'',value:0,active:true,from:'',to:''},{id:uid(),name:'Diskon 10%',cost:5,type:'pct',menuId:'',value:10,active:true,from:'',to:''}]};
 }
+
 let S=null,memOnly=false;
 function load(){
-  try{const raw=localStorage.getItem(KEY);if(raw){const o=JSON.parse(raw);if(o&&Array.isArray(o.menu)&&Array.isArray(o.ingredients))return o}}catch(e){memOnly=true}
+  try{
+    /* v2 data first */
+    let raw=localStorage.getItem(KEY);
+    if(raw){const o=JSON.parse(raw);if(o&&Array.isArray(o.menu)&&Array.isArray(o.ingredients))return o}
+    /* migration: read legacy v1 (read-only; do not mutate until first unlock) */
+    raw=localStorage.getItem('kasirkopi.v1');
+    if(raw){
+      const o=JSON.parse(raw);
+      if(o&&Array.isArray(o.menu)&&Array.isArray(o.ingredients)){
+        o.migrationPending=!!(o.pin||o.master);
+        return o;
+      }
+    }
+  }catch(e){memOnly=true}
   return seed();
 }
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){memOnly=true;banner()}}
+function snapshotState(){
+  S.snapshot=JSON.parse(JSON.stringify(S));
+}
+function rollbackState(){
+  if(S.snapshot){
+    Object.assign(S,S.snapshot);
+    S.snapshot=null;
+  }
+}
+function save(){
+  try{localStorage.setItem(KEY,JSON.stringify(S));return true}catch(e){memOnly=true;banner();rollbackState();return false}
+}
 
 /* ============ Logika inti (murni) ============ */
 function calcCart(cart,disc,menu){
@@ -375,6 +426,11 @@ function go(tab){
   }else{view.tab=tab;render()}
 }
 function askPin(err){
+  if(S.pinLockUntil&&Date.now()<S.pinLockUntil){
+    const wait=Math.ceil((S.pinLockUntil-Date.now())/1000);
+    modal('<h3>Area owner</h3><div class="note err">Terlalu banyak percobaan gagal. Coba lagi dalam '+wait+' detik.</div><button class="btn block" data-act="mclose">Tutup</button>');
+    return;
+  }
   modal('<h3>Area owner</h3><p class="hint" style="margin:0">Masukkan PIN owner untuk membuka halaman ini. Halaman terkunci lagi saat Anda pindah tab.</p>'+
     '<form data-form="pin" class="stack"><div class="field"><label for="pinIn">PIN</label><input id="pinIn" name="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" autofocus></div>'+
     (err?'<div class="note err">'+esc(err)+'</div>':'')+
@@ -494,6 +550,21 @@ async function deliver(filename,data){
 /* ============ Campaign reward ============ */
 function migrate(o){
   if(!Array.isArray(o.campaigns))o.campaigns=[{id:uid(),name:'Gratis 1 cup',cost:o.rewardAt||10,type:'free',menuId:'',value:0,active:true,from:'',to:''}];
+  /* ---- Schema v2 migration (idempotent) ---- */
+  if(typeof o.pin==='string'||typeof o.master==='string'){
+    o.migrationPending=!!(o.pin||o.master);
+  }
+  if(o.pin===undefined)o.pin=null;
+  if(o.master===undefined)o.master=null;
+  if(o.pinEnabled===undefined)o.pinEnabled=false;
+  if(o.recovery===undefined)o.recovery=null;
+  if(o.pinFails===undefined)o.pinFails=0;
+  if(o.pinLockUntil===undefined)o.pinLockUntil=0;
+  if(o.masterFails===undefined)o.masterFails=0;
+  if(o.masterLockUntil===undefined)o.masterLockUntil=0;
+  if(o.lastActive===undefined)o.lastActive=0;
+  if(o.sessionStart===undefined)o.sessionStart=0;
+  if(o.schemaVersion===undefined)o.schemaVersion=2;
   return o;
 }
 function calcFull(cart,disc,menu,rd,camps){
@@ -716,15 +787,16 @@ function pinBoxHtml(){
     '<div class="grid2">'+(pinStep.n?'<button type="button" class="btn" data-act="pinreset">Ulangi dari awal</button>':'<span></span>')+'<button class="btn primary">'+(pinStep.n===2?'Simpan PIN':'Lanjut')+'</button></div></form>';
 }
 function vAtur(v){
-  v.innerHTML='<div class="stack"><div class="sec" style="margin:0"><h2>Pengaturan owner</h2><span class="badge ok">Terbuka</span></div>'+
-    ((S.pinDefault||S.masterDefault)?'<div class="note warn">'+(S.pinDefault?'PIN masih bawaan (1234). ':'')+(S.masterDefault?'Master Code masih bawaan. ':'')+'Segera ganti di bawah.</div>':'')+
+  const unprotected=!S.pinEnabled;
+  v.innerHTML='<div class="stack"><div class="sec" style="margin:0"><h2>Pengaturan owner</h2><span class="badge '+(unprotected?'warn':'ok')+'">'+(unprotected?'Belum dilindungi':'Terbuka')+'</span></div>'+
+    (unprotected?'<div class="note warn">Area owner belum dilindungi — siapa pun yang membuka perangkat ini dapat mengakses data ini. Aktifkan PIN di bawah.</div>':'')+
     '<form class="card stack" data-form="shop"><h3>Toko</h3><div class="field"><label for="shopIn">Nama toko (tampil di struk)</label><input id="shopIn" name="shop" type="text" value="'+esc(S.shop)+'"></div>'+
     '<button class="btn primary">Simpan</button></form>'+campCard()+
     '<div class="card stack"><h3>Operator kasir</h3><div>'+(S.operators.length?S.operators.map(o=>'<div class="row"><div class="grow"><strong>'+esc(o.name)+'</strong></div><button class="btn sm ghost" style="color:var(--danger)" data-act="opdel" data-id="'+o.id+'">Hapus</button></div>').join(''):'<div class="empty">Belum ada operator.</div>')+'</div>'+
       '<form data-form="op" style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px"><input name="name" type="text" placeholder="Nama petugas baru" aria-label="Nama petugas baru" maxlength="30"><button class="btn primary">Tambah</button></form></div>'+
-    '<div class="card stack"><h3>Ganti PIN</h3><div id="pinBox">'+pinBoxHtml()+'</div></div>'+
-    '<form class="card stack" data-form="master"><h3>Master Code darurat</h3><p class="hint" style="margin:0">Dipakai dari layar PIN (Lupa PIN) untuk mengembalikan PIN ke 1234 tanpa menghapus data. Simpan di tempat aman.</p>'+
-      '<div class="field"><label for="mcNew">Master Code baru (min. 6 karakter)</label><input id="mcNew" name="mc" type="password" autocomplete="off"></div><button class="btn primary">Simpan Master Code</button></form>'+
+    '<div class="card stack"><h3>'+(unprotected?'Aktifkan PIN':'Ganti PIN')+'</h3><div id="pinBox">'+pinBoxHtml()+'</div></div>'+
+    '<div class="card stack"><h3>Master Code '+(!S.master?'pengaturan':'darurat')+'</h3><p class="hint" style="margin:0">'+(unprotected?'Buat Master Code pertama kali (min. 12 karakter).':'Dipakai saat lupa PIN untuk mengatur ulang kredensial. Simpan di tempat aman.')+'</p>'+
+      '<div class="field"><label for="mcNew">Master Code baru (min. 12 karakter)</label><input id="mcNew" name="mc" type="password" autocomplete="off" minlength="12"></div><button class="btn primary">'+(!S.master?'Buat Master Code':'Simpan Master Code')+'</button></div>'+
     '<div class="card stack"><h3>Cadangan data</h3><p class="hint" style="margin:0">Data tersimpan di browser perangkat ini. Unduh cadangan sebelum ganti HP atau menghapus data browser.</p>'+
       '<button class="btn" data-act="backup">Unduh cadangan (.json)</button><div class="field"><label for="restoreIn">Pulihkan dari cadangan</label><input id="restoreIn" type="file" accept=".json,application/json"></div></div></div>';
 }
@@ -735,7 +807,7 @@ const A={
   mclose:()=>closeModal(),
   confirmyes:()=>{const f=pendingConfirm;pendingConfirm=null;closeModal();f&&f()},
   forgot:()=>{
-    modal('<h3>Reset PIN</h3><p class="hint" style="margin:0">Masukkan Master Code. PIN kembali ke 1234, data transaksi, stok, dan pelanggan tidak berubah.</p><form data-form="master-reset" class="stack"><div class="field"><label for="mcIn">Master Code</label><input id="mcIn" name="mc" type="password" autocomplete="off" autofocus></div><div id="mcErr"></div><div class="grid2"><button type="button" class="btn" data-act="mclose">Batal</button><button class="btn primary">Reset PIN</button></div></form>');
+    modal('<h3>Lupa PIN</h3><p class="hint" style="margin:0">Masukkan Master Code. PIN akan diatur ulang ke PIN baru (bukan default). Data transaksi, stok, dan pelanggan tidak berubah.</p><form data-form="master-reset" class="stack"><div class="field"><label for="mcIn">Master Code</label><input id="mcIn" name="mc" type="password" autocomplete="off" autofocus></div><div id="mcErr"></div><div class="grid2"><button type="button" class="btn" data-act="mclose">Batal</button><button class="btn primary">Lanjutkan</button></div></form>');
   },
   add:t=>{cart[t.dataset.id]=(cart[t.dataset.id]||0)+1;updateCart()},
   inc:t=>{cart[t.dataset.id]=(cart[t.dataset.id]||0)+1;updateCart()},
@@ -776,20 +848,90 @@ const A={
   rrdel:t=>{t.closest('.rrow').remove()},
   opdel:t=>{const id=t.dataset.id;const o=S.operators.find(x=>x.id===id);confirmBox('Hapus operator "'+o.name+'"? Riwayat transaksi lama tetap tersimpan.',()=>{S.operators=S.operators.filter(x=>x.id!==id);if(S.op===id)S.op='';save();render()},'Hapus')},
   pinreset:()=>{pinStep={n:0,old:'',nw:''};$('#pinBox').innerHTML=pinBoxHtml();$('#ps').focus()},
-  backup:()=>deliver('cadangan-kasir-'+today()+'.json',JSON.stringify(S))
+  backup:()=>{
+    /* Default backup includes credential envelope for owner restore use.
+       Restore shows explicit warning about brute-force risk. */
+    deliver('cadangan-kasir-'+today()+'.json',JSON.stringify({
+      shop:S.shop,rewardAt:S.rewardAt,operators:S.operators,ingredients:S.ingredients,menu:S.menu,
+      campaigns:S.campaigns,customers:S.customers,tx:S.tx,
+      pinEnabled:S.pinEnabled,pin:S.pin,master:S.master,recovery:S.recovery,
+      pinFails:S.pinFails,pinLockUntil:S.pinLockUntil,masterFails:S.masterFails,masterLockUntil:S.masterLockUntil,
+      lastActive:S.lastActive,sessionStart:S.sessionStart,schemaVersion:S.schemaVersion
+    }))
+  }
 };
 document.addEventListener('click',e=>{const t=e.target.closest('[data-act]');if(!t)return;const f=A[t.dataset.act];if(f){e.preventDefault();f(t,e)}});
 
 /* ============ Form submit ============ */
 const okPin=s=>/^\d{4,6}$/.test(s);
 const F={
-  pin:f=>{
+  pin:async f=>{
     const v=f.pin.value;
-    if(hash(v)===S.pin)unlockTo(pendingTab);else askPin('PIN salah. Coba lagi.');
+    if(v.length<4||v.length>6)return;
+    if(!S.pin){askPin('PIN belum diatur.');return;}
+    if(S.pinLockUntil&&Date.now()<S.pinLockUntil){
+      const wait=Math.ceil((S.pinLockUntil-Date.now())/1000);
+      askPin('Terlalu banyak percobaan gagal. Coba lagi dalam '+wait+' detik.');
+      return;
+    }
+    let ok=await verifyEnvelope(v,S.pin);
+    if(!ok&&S.migrationPending){
+      if(S.pin&&typeof S.pin==='string'&&legacyHash(v)===S.pin){
+        ok=true;
+        snapshotState();
+        S.pin=await makeEnvelope(v);
+        S.master=S.master&&typeof S.master==='string'?await makeEnvelope(S.master):null;
+        S.pinEnabled=true;
+        S.migrationPending=false;
+        if(!save()){rollbackState();askPin('Migrasi gagal. Coba lagi.');return;}
+      }
+    }
+    if(ok){
+      S.pinFails=0;S.pinLockUntil=0;
+      unlockTo(pendingTab);
+    }else{
+      S.pinFails=(S.pinFails||0)+1;
+      if(S.pinFails>=5){S.pinFails=0;S.pinLockUntil=Date.now()+5*60*1000;save();askPin('Terlalu banyak percobaan. Coba lagi nanti.');}
+      else{save();askPin('PIN salah. Coba lagi.');}
+    }
   },
-  'master-reset':f=>{
-    if(hash(f.mc.value)===S.master){S.pin=hash('1234');S.pinDefault=true;save();unlockTo(pendingTab);toast('PIN direset ke 1234. Segera ganti.')}
-    else $('#mcErr').innerHTML='<div class="note err">Master Code salah.</div>';
+  'master-reset':async f=>{
+    if(!S.master)return;
+    if(!S.pinEnabled){askPin('PIN belum aktif.');return;}
+    if(S.masterLockUntil&&Date.now()<S.masterLockUntil){
+      $('#mcErr').innerHTML='<div class="note err">Terkunci. Coba lagi nanti.</div>';
+      return;
+    }
+    if(await verifyEnvelope(f.mc.value,S.master)){
+      S.masterFails=0;S.masterLockUntil=0;
+      S.masterVerified=true;
+      save();
+      pinStep={n:1,old:'',nw:''};
+      modal('<h3>Buat PIN baru</h3><p class="hint" style="margin:0">Master Code terverifikasi. Buat PIN baru (4-6 angka). PIN default tidak digunakan.</p>'+
+        '<form data-form="recovery-pin" class="stack"><div class="field"><label for="rp1">PIN baru (4-6 angka)</label><input id="rp1" name="p1" type="password" inputmode="numeric" autocomplete="off" maxlength="6" autofocus></div>'+
+        '<div class="field"><label for="rp2">Ulangi PIN baru</label><input id="rp2" name="p2" type="password" inputmode="numeric" autocomplete="off" maxlength="6"></div>'+
+        '<div id="rpErr"></div><div class="grid2"><button type="button" class="btn" data-act="mclose">Batal</button><button class="btn primary">Simpan PIN baru</button></div></form>');
+    }else{
+      S.masterFails=(S.masterFails||0)+1;
+      if(S.masterFails>=3){S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();$('#mcErr').innerHTML='<div class="note err">Terlalu banyak percobaan. Terkunci 60 detik.</div>';return;}
+      save();
+      $('#mcErr').innerHTML='<div class="note err">Master Code salah.</div>';
+    }
+  },
+  'recovery-pin':async f=>{
+    const p1=f.p1.value,p2=f.p2.value,err=m=>{$('#rpErr').innerHTML='<div class="note err">'+esc(m)+'</div>'};
+    if(!okPin(p1))return err('PIN harus 4 sampai 6 angka.');
+    if(p1!==p2)return err('Konfirmasi tidak sama.');
+    snapshotState();
+    S.pin=await makeEnvelope(p1);
+    S.pinEnabled=true;
+    S.pinDefault=false;
+    if(save()){
+      pinStep={n:0,old:'',nw:''};
+      S.masterVerified=false;
+      unlockTo(pendingTab);
+      toast('PIN baru disimpan');
+    }else{rollbackState();err('Gagal menyimpan. Coba lagi.');}
   },
   ing:f=>{
     const name=f.name.value.trim();if(!name)return;
@@ -819,14 +961,32 @@ const F={
   },
   shop:f=>{S.shop=f.shop.value.trim()||'Kasir Kopi';save();toast('Pengaturan disimpan');render()},
   op:f=>{const n=f.name.value.trim();if(!n)return;if(S.operators.some(o=>o.name.toLowerCase()===n.toLowerCase())){toast('Nama sudah ada',true);return}S.operators.push({id:uid(),name:n});save();render()},
-  master:f=>{const m=f.mc.value;if(m.length<6){toast('Master Code minimal 6 karakter',true);return}S.master=hash(m);S.masterDefault=false;save();toast('Master Code disimpan');render()},
-  pinstep:f=>{
+  master:async f=>{
+    const m=f.mc.value;
+    if(m.length<12){toast('Master Code minimal 12 karakter',true);return;}
+    if(!S.master){
+      snapshotState();
+      S.master=await makeEnvelope(m);
+      S.masterVerified=false;
+      if(save()){toast('Master Code disimpan');render();}else{rollbackState();toast('Gagal menyimpan Master Code',true);}
+    }else if(!S.masterVerified){
+      if(await verifyEnvelope(m,S.master)){S.masterVerified=true;save();toast('Master Code diverifikasi');render();}
+      else{toast('Master Code salah',true);}
+    }
+  },
+  pinstep:async f=>{
     const v=f.v.value,err=m=>{$('#psErr').innerHTML='<div class="note err">'+esc(m)+'</div>'};
-    if(pinStep.n===0){if(hash(v)!==S.pin)return err('PIN lama salah.');pinStep.old=v;pinStep.n=1}
+    if(pinStep.n===0){
+      if(!await verifyEnvelope(v,S.pin))return err('PIN lama salah.');
+      pinStep.old=v;pinStep.n=1;
+    }
     else if(pinStep.n===1){if(!okPin(v))return err('PIN harus 4 sampai 6 angka.');pinStep.nw=v;pinStep.n=2}
     else{
       if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
-      S.pin=hash(v);S.pinDefault=false;save();pinStep={n:0,old:'',nw:''};toast('PIN berhasil diganti');render();return;
+      snapshotState();
+      S.pin=await makeEnvelope(v);S.pinEnabled=true;S.pinDefault=false;
+      if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil diganti');render();return;}
+      rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
     }
     $('#pinBox').innerHTML=pinBoxHtml();$('#ps').focus();
   }
@@ -856,8 +1016,16 @@ document.addEventListener('change',e=>{
     const file=t.files[0];const fr=new FileReader();
     fr.onload=()=>{
       try{const o=JSON.parse(fr.result);if(!o||!Array.isArray(o.menu)||!Array.isArray(o.ingredients)||!Array.isArray(o.operators))throw 0;
-        confirmBox('Timpa semua data saat ini dengan isi cadangan ini?',()=>{S=migrate(o);save();toast('Data dipulihkan');render()},'Pulihkan')}
-      catch(err){toast('File cadangan tidak valid',true)}
+        const hasEnvelope=!(!(o.pin||o.master)||(o.pin&&typeof o.pin=='string'&&!o.pin.hash)||(o.master&&typeof o.master=='string'&&!o.master.hash));
+        const legacy=!hasEnvelope&&(o.pin&&typeof o.pin=='string'&&o.pin.startsWith('h'));
+        if(legacy){
+          confirmBox('Backup ini tidak berisi kredensial terenkripsi. Data bisnis akan dipulihkan, namun PIN & Master Code harus diatur ulang. Lanjutkan?',()=>{S=migrate(o);save();toast('Data dipulihkan - kredensial wajib diatur ulang');render();askPin('Masukkan PIN baru untuk melanjutkan');},'Pulihkan tanpa kredensial');
+        }else if(hasEnvelope){
+          confirmBox('Backup ini berisi kredensial terenkripsi (hash+salt+iterasi). Risiko kebocoran jika file didapat orang lain. PIN/Master lama mungkin pernah dikompromikan. Lanjutkan?',()=>{S=migrate(o);save();toast('Data dipulihkan dengan kredensial');render();askPin('Verifikasi kredensial baru');},'Batal - atur ulang kredensial');
+        }else{
+          confirmBox('Format cadangan tidak dikenali. Data bisnis dipulihkan, kredensial harus diatur ulang?',()=>{S=migrate(o);save();toast('Data dipulihkan - kredensial wajib diatur ulang');render();askPin('Masukkan PIN baru');},'Batal');
+        }
+      }catch(err){toast('File cadangan tidak valid',true)}
     };
     fr.readAsText(file);t.value='';
   }
@@ -868,6 +1036,24 @@ function tick(){const d=new Date();const el=$('#clock');if(el)el.textContent=d.t
 function init(){
   S=migrate(load());
   if(!S.op||!S.operators.some(o=>o.id===S.op))S.op='';
+  /* ---- Web Crypto probe (fail-closed) ---- */
+  if(!window.crypto||!window.crypto.subtle){toast('Web Crypto tidak didukung - fitur owner tidak tersedia',true);render();return;}
+  /* ---- Session tracking & resume recovery ---- */
+  S.lastActive=Date.now();if(!S.sessionStart)S.sessionStart=S.lastActive;
+  /* ---- Resume recovery wizard if pending ---- */
+  if(S.recovery){
+    const step=S.recovery.step||1;
+    if(step===1){S.masterVerified=false;}
+    render();
+  }
+  /* ---- Idle/visibility timer (5 menit) ---- */
+  let idleTimer=null;
+  const resetIdle=()=>{clearTimeout(idleTimer);S.lastActive=Date.now();idleTimer=setTimeout(()=>{S.pinLockUntil=Date.now()+5*60*1000;S.masterLockUntil=Date.now()+5*60*1000;save();render();toast('Sesi kedaluwarsa — terlalu lama tidak aktif. Masukkan PIN/Master.');},5*60*1000);};
+  resetIdle();
+  document.addEventListener('mousemove',resetIdle);
+  document.addEventListener('keydown',resetIdle);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(idleTimer);S.pinLockUntil=Date.now()+5*60*1000;S.masterLockUntil=Date.now()+5*60*1000;save();render();toast('Sesi dikunci — aplikasi dipindah ke background.');}else{resetIdle();}});
+  /* ---- Render after all init ---- */
   render();tick();setInterval(tick,30000);
   try{if(window.claude&&claude.use)claude.use('downloads').then(d=>{downloads=d||false}).catch(()=>{downloads=false})}catch(e){downloads=false}
 }
