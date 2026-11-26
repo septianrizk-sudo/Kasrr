@@ -958,10 +958,10 @@ const F={
         /* 5 fails -> 30s lockout; after 3 cycles escalate to 5 min */
         S.pinFails=0;
         S.pinCycles=(S.pinCycles||0)+1;
-        const lockoutMs=S.pinCycles>3?5*60*1000:30*1000;
+        const lockoutMs=S.pinCycles>=3?5*60*1000:30*1000;
         S.pinLockUntil=Date.now()+lockoutMs;
         save();
-        askPin(S.pinCycles>3?'Terlalu banyak percobaan. Terkunci 5 menit.':'Terlalu banyak percobaan. Coba lagi dalam 30 detik.');
+        askPin(S.pinCycles>=3?'Terlalu banyak percobaan. Terkunci 5 menit.':'Terlalu banyak percobaan. Coba lagi dalam 30 detik.');
       }else{save();askPin('PIN salah. Coba lagi.');}
     }
   },
