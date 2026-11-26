@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Crypto Verification Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #f5f5f5; }
+    .pass { color: green; }
+    .fail { color: red; }
+    .warn { color: orange; }
+    .section { margin: 20px 0; padding: 15px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    h2 { margin-top: 0; }
+    pre { background: #f8f8f8; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    button { padding: 10px 20px; margin: 5px; font-size: 14px; cursor: pointer; }
+    button.primary { background: #007bff; color: white; border: none; }
+    button.secondary { background: #6c757d; color: white; border: none; }
+  </style>
+</head>
+<body>
+  <h1>Kasrr - Crypto Verification (Phase 0)</h1>
+  <div id="status"></div>
+  
+  <div class="section">
+    <h2>1. crypto.getRandomValues</h2>
+    <button class="primary" onclick="testRandomValues()">Run Test</button>
+    <pre id="test-random"></pre>
+  </div>
+  
+  <div class="section">
+    <h2>2. crypto.subtle Availability</h2>
+    <button class="primary" onclick="testSubtle()">Run Test</button>
+    <pre id="test-subtle"></pre>
+  </div>
+  
+  <div class="section">
+    <h2>3. PBKDF2-HMAC-SHA-256 (600,000 iterations)</h2>
+    <button class="primary" onclick="testPBKDF2()">Run Test</button>
+    <pre id="test-pbkdf2"></pre>
+  </div>
+  
+  <div class="section">
+    <h2>4. localStorage Envelope Storage/Read</h2>
+    <button class="primary" onclick="testStorage()">Run Test</button>
+    <pre id="test-storage"></pre>
+  </div>
+  
+  <div class="section">
+    <h2>5. Run All Tests</h2>
+    <button class="primary" onclick="runAllTests()">Run All Tests</button>
+    <pre id="test-all"></pre>
+  </div>
+
+  <div class="section">
+    <button class="secondary" onclick="exportResults()">Export Results (TXT)</button>
+  </div>
+
+  <script>
+    // Store test results for export
+    const testResults = {
+      tests: {},
+      meta: {}
+    };
+
+    function getPlatformInfo() {
+      return {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        language: navigator.language,
+        cookieEnabled: navigator.cookieEnabled,
+        onLine: navigator.onLine,
+        secureContext: window.isSecureContext,
+        protocol: location.protocol,
+        hostname: location.hostname,
+        timestamp: new Date().toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        screenWidth: screen.width,
+        screenHeight: screen.height,
+        colorDepth: screen.colorDepth
+      };
+    }
+
+    function formatPlatformInfo(info) {
+      return Object.entries(info).map(([k, v]) => `${k}: ${v}`).join('\n');
+    }
+    function log(element, message, className = '') {
+      const line = document.createElement('div');
+      line.className = className;
+      line.textContent = message;
+      element.appendChild(line);
+      element.scrollTop = element.scrollHeight;
+    }
+    
+    function clear(element) {
+      element.innerHTML = '';
+    }
+    
+    async function testRandomValues() {
+      const el = document.getElementById('test-random');
+      const platform = getPlatformInfo();
+      clear(el);
+      log(el, 'Testing crypto.getRandomValues...');
+      log(el, `Platform: ${platform.platform} | UA: ${platform.userAgent}`);
+      log(el, `Time: ${platform.timestamp}`);
+      try {
+        const buffer = new Uint8Array(16);
+        crypto.getRandomValues(buffer);
+        log(el, `✓ SUCCESS: ${buffer.length} random bytes generated`, 'pass');
+        log(el, `Sample: [${Array.from(buffer.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')}...]`, 'pass');
+        testResults.tests['crypto.getRandomValues'] = { passed: true, platform, details: `Generated ${buffer.length} random bytes` };
+      } catch (e) {
+        log(el, `✗ FAILED: ${e.message}`, 'fail');
+        testResults.tests['crypto.getRandomValues'] = { passed: false, platform, error: e.message };
+      }
+    }
+    
+    async function testSubtle() {
+      const el = document.getElementById('test-subtle');
+      const platform = getPlatformInfo();
+      clear(el);
+      log(el, 'Testing crypto.subtle availability...');
+      log(el, `Platform: ${platform.platform} | UA: ${platform.userAgent}`);
+      log(el, `Time: ${platform.timestamp}`);
+      try {
+        if (typeof crypto.subtle === 'undefined') {
+          log(el, `✗ FAILED: crypto.subtle is undefined`, 'fail');
+          testResults.tests['crypto.subtle'] = { passed: false, platform, error: 'crypto.subtle is undefined' };
+          return;
+        }
+        log(el, `✓ SUCCESS: crypto.subtle is available`, 'pass');
+        log(el, `Available algorithms: ${Object.getOwnPropertyNames(crypto.subtle).join(', ')}`, 'pass');
+        testResults.tests['crypto.subtle'] = { passed: true, platform, details: 'crypto.subtle available' };
+      } catch (e) {
+        log(el, `✗ FAILED: ${e.message}`, 'fail');
+        testResults.tests['crypto.subtle'] = { passed: false, platform, error: e.message };
+      }
+    }
+    
+    async function testPBKDF2() {
+      const el = document.getElementById('test-pbkdf2');
+      const platform = getPlatformInfo();
+      clear(el);
+      log(el, 'Testing PBKDF2-HMAC-SHA-256 with 600,000 iterations...');
+      log(el, `Platform: ${platform.platform} | UA: ${platform.userAgent}`);
+      log(el, `Time: ${platform.timestamp}`);
+      try {
+        const iterations = 600000;
+        const hashLength = 32; // 256 bits
+        
+        // Import test key
+        const key = await crypto.subtle.importKey(
+          'raw',
+          new TextEncoder().encode('test_master_key_123456789012'),
+          { name: 'PBKDF2' },
+          false,
+          ['deriveBits']
+        );
+        
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        log(el, `Salt generated: ${Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('')}`);
+        log(el, `Starting derivation (${iterations} iterations, ${hashLength} bytes output)...`);
+        
+        const start = performance.now();
+        const derivedBits = await crypto.subtle.deriveBits(
+          { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+          key,
+          hashLength * 8
+        );
+        const end = performance.now();
+        
+        const duration = (end - start).toFixed(2);
+        log(el, `✓ SUCCESS: PBKDF2 completed in ${duration} ms`, 'pass');
+        log(el, `Derived bits length: ${derivedBits.byteLength} bytes`, 'pass');
+        
+        if (derivedBits.byteLength === hashLength) {
+          log(el, `✓ Output length verified (32 bytes = 256 bits)`, 'pass');
+        } else {
+          log(el, `✗ Output length mismatch: expected ${hashLength}, got ${derivedBits.byteLength}`, 'fail');
+        }
+        
+        // Show first 16 bytes of derived key
+        const derivedArray = new Uint8Array(derivedBits);
+        const hex = Array.from(derivedArray.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        log(el, `Derived key (first 16 bytes): ${hex}`);
+        
+        // Benchmark check
+        if (duration > 1000) {
+          log(el, `⚠ WARNING: Duration ${duration}ms exceeds 1000ms threshold`, 'warn');
+        } else {
+          log(el, `✓ Duration within acceptable range (≤1000ms)`, 'pass');
+        }
+
+        testResults.tests['PBKDF2-HMAC-SHA-256 (600k iterations)'] = { passed: true, platform, duration: parseFloat(duration) };
+
+        return { success: true, duration: parseFloat(duration) };
+      } catch (e) {
+        log(el, `✗ FAILED: ${e.message}`, 'fail');
+        testResults.tests['PBKDF2-HMAC-SHA-256 (600k iterations)'] = { passed: false, platform, error: e.message };
+        return { success: false, error: e.message };
+      }
+    }
+    
+    async function testStorage() {
+      const el = document.getElementById('test-storage');
+      const platform = getPlatformInfo();
+      clear(el);
+      log(el, 'Testing localStorage envelope storage/read...');
+      log(el, `Platform: ${platform.platform} | UA: ${platform.userAgent}`);
+      log(el, `Time: ${platform.timestamp}`);
+      try {
+        const envelope = {
+          hash: 'dGVzdF9oYXNoX2RhdGE=', // base64 encoded
+          salt: 'dGVzdF9zYWx0X2RhdGE=',  // base64 encoded
+          iter: 600000,
+          hashType: 'PBKDF2-HMAC-SHA256',
+          version: 2
+        };
+        
+        const storageKey = 'kasrr.test_envelope';
+        
+        // Store
+        localStorage.setItem(storageKey, JSON.stringify(envelope));
+        log(el, `✓ Stored envelope to localStorage key: ${storageKey}`, 'pass');
+        
+        // Retrieve
+        const stored = JSON.parse(localStorage.getItem(storageKey));
+        log(el, `✓ Retrieved envelope from localStorage`, 'pass');
+        
+        // Verify integrity
+        if (JSON.stringify(envelope) === JSON.stringify(stored)) {
+          log(el, `✓ Data integrity verified - envelope matches`, 'pass');
+        } else {
+          log(el, `✗ Data integrity failed - envelope mismatch`, 'fail');
+        }
+        
+        // Test with binary data (Uint8Array via base64)
+        const testSalt = crypto.getRandomValues(new Uint8Array(16));
+        const binaryEnvelope = {
+          hash: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
+          salt: btoa(String.fromCharCode(...testSalt)),
+          iter: 600000,
+          hashType: 'PBKDF2-HMAC-SHA256',
+          version: 2
+        };
+        
+        localStorage.setItem('kasrr.test_envelope_binary', JSON.stringify(binaryEnvelope));
+        const storedBinary = JSON.parse(localStorage.getItem('kasrr.test_envelope_binary'));
+        
+        // Verify salt round-trip
+        const originalSalt = atob(binaryEnvelope.salt);
+        const storedSalt = atob(storedBinary.salt);
+        if (originalSalt === storedSalt) {
+          log(el, `✓ Binary envelope (base64 salt) round-trip verified`, 'pass');
+        } else {
+          log(el, `✗ Binary envelope round-trip failed`, 'fail');
+        }
+        
+        // Clean up test keys
+        localStorage.removeItem(storageKey);
+        localStorage.removeItem('kasrr.test_envelope_binary');
+        log(el, `✓ Test keys cleaned up`, 'pass');
+
+        testResults.tests['localStorage Envelope Storage/Read'] = { passed: true, platform };
+
+        return { success: true };
+      } catch (e) {
+        log(el, `✗ FAILED: ${e.message}`, 'fail');
+        testResults.tests['localStorage Envelope Storage/Read'] = { passed: false, platform, error: e.message };
+        return { success: false, error: e.message };
+      }
+    }
+    
+    async function runAllTests() {
+      const el = document.getElementById('test-all');
+      clear(el);
+      log(el, '=== Running All Crypto Verification Tests ===');
+      log(el, '');
+      
+      log(el, '--- Test 1: crypto.getRandomValues ---');
+      await testRandomValues();
+      log(el, '');
+      
+      log(el, '--- Test 2: crypto.subtle Availability ---');
+      await testSubtle();
+      log(el, '');
+      
+      log(el, '--- Test 3: PBKDF2-HMAC-SHA-256 (600k iterations) ---');
+      const pbkdf2Result = await testPBKDF2();
+      log(el, '');
+      
+      log(el, '--- Test 4: localStorage Envelope Storage ---');
+      await testStorage();
+      log(el, '');
+      
+      log(el, '=== SUMMARY ===', 'pass');
+      log(el, `Environment: ${navigator.userAgent}`, 'pass');
+      log(el, `Secure Context: ${window.isSecureContext ? 'Yes' : 'No'}`, window.isSecureContext ? 'pass' : 'warn');
+      log(el, `HTTPS: ${location.protocol === 'https:' ? 'Yes' : 'No'}`, location.protocol === 'https:' ? 'pass' : 'warn');
+      
+      if (pbkdf2Result?.duration) {
+        log(el, `PBKDF2 Duration: ${pbkdf2Result.duration}ms`, pbkdf2Result.duration <= 1000 ? 'pass' : 'warn');
+      }
+
+      testResults.meta = {
+        ...getPlatformInfo(),
+        totalTests: Object.keys(testResults.tests).length,
+        passCount: Object.values(testResults.tests).filter(r => r.passed).length,
+        failCount: Object.values(testResults.tests).filter(r => !r.passed).length,
+        allPassed: Object.values(testResults.tests).every(r => r.passed)
+      };
+
+      log(el, `--- PASSED: ${testResults.meta.passCount} / ${testResults.meta.totalTests} ---`, 'pass');
+      if (testResults.meta.failCount > 0) {
+        log(el, `--- FAILED: ${testResults.meta.failCount} ---`, 'fail');
+      }
+    }
+
+    function exportResults() {
+      const meta = getPlatformInfo();
+      const lines = [];
+      lines.push('Kasrr - Crypto Verification (Phase 0) - Test Results');
+      lines.push('======================================================');
+      lines.push('');
+      lines.push('--- Environment ---');
+      Object.entries(meta).forEach(([k, v]) => lines.push(`${k}: ${v}`));
+      lines.push('');
+      lines.push('--- Test Results ---');
+      lines.push('');
+      Object.entries(testResults.tests).forEach(([name, r]) => {
+        lines.push(`[${name}] ${r.passed ? 'PASS' : 'FAIL'}`);
+        lines.push(`  Platform: UA=${r.platform.userAgent} | Platform=${r.platform.platform} | Time=${r.platform.timestamp}`);
+        lines.push(`  Status: ${r.passed ? 'PASS' : 'FAIL'}`);
+        if (r.duration !== undefined) lines.push(`  Duration: ${r.duration.toFixed(2)} ms`);
+        lines.push('');
+      });
+      lines.push('--- Summary ---');
+      lines.push(`Total Tests: ${meta.totalTests}`);
+      lines.push(`Passed: ${meta.passCount}`);
+      lines.push(`Failed: ${meta.failCount}`);
+      lines.push(`All Passed: ${meta.allPassed}`);
+      lines.push('');
+
+      const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `kasrr_crypto_test_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  </script>
+</body>
+</html>
