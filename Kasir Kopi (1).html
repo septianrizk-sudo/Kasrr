@@ -422,6 +422,10 @@ function go(tab){
   view.unlocked=false;
   if(LOCKED.includes(tab)){
     pendingTab=tab;
+    if(!S.pinEnabled){
+      /* First-time setup: owner area not yet protected — allow access to owner tab for setup */
+      view.tab=tab;render();return;
+    }
     if(fromLocked){view.tab='kasir';render()}
     askPin();
   }else{view.tab=tab;render()}
@@ -833,10 +837,40 @@ function menuForm(m){
 
 /* ============ Atur (owner) ============ */
 function pinBoxHtml(){
-  const labels=['PIN lama','PIN baru (4-6 angka)','Ulangi PIN baru'];
-  return '<form data-form="pinstep" class="stack"><div class="lbl">Langkah '+(pinStep.n+1)+' dari 3</div>'+
+  const setup=!S.pin;
+  const labels=setup?['PIN baru (4-6 angka)','Ulangi PIN baru']:['PIN lama','PIN baru (4-6 angka)','Ulangi PIN baru'];
+  const total=setup?2:3;
+  return '<form data-form="pinstep" class="stack"><div class="lbl">Langkah '+(pinStep.n+1)+' dari '+total+'</div>'+
     '<div class="field"><label for="ps">'+labels[pinStep.n]+'</label><input id="ps" name="v" type="password" inputmode="numeric" autocomplete="off" maxlength="6"></div><div id="psErr"></div>'+
-    '<div class="grid2">'+(pinStep.n?'<button type="button" class="btn" data-act="pinreset">Ulangi dari awal</button>':'<span></span>')+'<button class="btn primary">'+(pinStep.n===2?'Simpan PIN':'Lanjut')+'</button></div></form>';
+    '<div class="grid2">'+(pinStep.n?'<button type="button" class="btn" data-act="pinreset">Ulangi dari awal</button>':'<span></span>')+'<button class="btn primary">'+(setup?(pinStep.n===1?'Aktifkan PIN':'Lanjut'):(pinStep.n===total-1?'Simpan PIN':'Lanjut'))+'</button></div></form>';
+}
+function masterCardHtml(){
+  const legacy=typeof S.master==='string';
+  let inner;
+  if(!S.master){
+    inner='<h3>Master Code pengaturan</h3>'+
+      '<p class="hint" style="margin:0">Buat Master Code pertama kali (min. 12 karakter). Simpan di tempat aman — dipakai saat lupa PIN.</p>'+
+      '<div class="field"><label for="mcNew">Master Code baru (min. 12 karakter)</label><input id="mcNew" name="mc" type="password" autocomplete="off" minlength="12"></div>'+
+      '<div class="field"><label for="mcConfirm">Ulangi Master Code baru</label><input id="mcConfirm" name="mc2" type="password" autocomplete="off" minlength="12"></div>'+
+      '<div id="mcErr"></div><button class="btn primary">Buat Master Code</button>';
+  }else if(legacy){
+    inner='<h3>Migrasi Master Code</h3>'+
+      '<p class="hint" style="margin:0">Master Code lama memakai format lemah. Verifikasi Master Code lama, lalu buat Master Code baru (min. 12 karakter).</p>'+
+      '<div class="field"><label for="mcOld">Master Code lama</label><input id="mcOld" name="mcOld" type="password" autocomplete="off"></div>'+
+      '<div class="field"><label for="mcNew">Master Code baru (min. 12 karakter)</label><input id="mcNew" name="mc" type="password" autocomplete="off" minlength="12"></div>'+
+      '<div class="field"><label for="mcConfirm">Ulangi Master Code baru</label><input id="mcConfirm" name="mc2" type="password" autocomplete="off" minlength="12"></div>'+
+      '<div id="mcErr"></div><button class="btn primary">Migrasikan Master Code</button>';
+  }else if(!S.masterVerified){
+    inner='<h3>Master Code darurat</h3>'+
+      '<p class="hint" style="margin:0">Master Code aktif. Verifikasi untuk mengonfirmasi akses darurat.</p>'+
+      '<div class="field"><label for="mcNew">Master Code</label><input id="mcNew" name="mc" type="password" autocomplete="off"></div>'+
+      '<div id="mcErr"></div><button class="btn primary">Verifikasi Master Code</button>';
+  }else{
+    inner='<h3>Master Code darurat</h3>'+
+      '<p class="hint" style="margin:0">Master Code aktif dan terverifikasi. Dipakai saat lupa PIN untuk pemulihan.</p>'+
+      '<div class="note ok">Master Code siap digunakan untuk pemulihan.</div>';
+  }
+  return '<form data-form="master" class="card stack">'+inner+'</form>';
 }
 function vAtur(v){
   const unprotected=!S.pinEnabled;
@@ -847,8 +881,7 @@ function vAtur(v){
     '<div class="card stack"><h3>Operator kasir</h3><div>'+(S.operators.length?S.operators.map(o=>'<div class="row"><div class="grow"><strong>'+esc(o.name)+'</strong></div><button class="btn sm ghost" style="color:var(--danger)" data-act="opdel" data-id="'+o.id+'">Hapus</button></div>').join(''):'<div class="empty">Belum ada operator.</div>')+'</div>'+
       '<form data-form="op" style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px"><input name="name" type="text" placeholder="Nama petugas baru" aria-label="Nama petugas baru" maxlength="30"><button class="btn primary">Tambah</button></form></div>'+
     '<div class="card stack"><h3>'+(unprotected?'Aktifkan PIN':'Ganti PIN')+'</h3><div id="pinBox">'+pinBoxHtml()+'</div></div>'+
-    '<div class="card stack"><h3>Master Code '+(!S.master?'pengaturan':'darurat')+'</h3><p class="hint" style="margin:0">'+(unprotected?'Buat Master Code pertama kali (min. 12 karakter).':'Dipakai saat lupa PIN untuk mengatur ulang kredensial. Simpan di tempat aman.')+'</p>'+
-      '<div class="field"><label for="mcNew">Master Code baru (min. 12 karakter)</label><input id="mcNew" name="mc" type="password" autocomplete="off" minlength="12"></div><button class="btn primary">'+(!S.master?'Buat Master Code':'Simpan Master Code')+'</button></div>'+
+    masterCardHtml()+
     '<div class="card stack"><h3>Cadangan data</h3><p class="hint" style="margin:0">Data tersimpan di browser perangkat ini. Unduh cadangan sebelum ganti HP atau menghapus data browser.</p>'+
       '<button class="btn" data-act="backup">Unduh cadangan (tanpa kredensial)</button>'+
       '<button class="btn ghost" data-act="backupWithCreds">Unduh cadangan + kredensial (berisiko)</button>'+
@@ -994,36 +1027,70 @@ const F={
   shop:f=>{S.shop=f.shop.value.trim()||'Kasir Kopi';save();toast('Pengaturan disimpan');render()},
   op:f=>{const n=f.name.value.trim();if(!n)return;if(S.operators.some(o=>o.name.toLowerCase()===n.toLowerCase())){toast('Nama sudah ada',true);return}S.operators.push({id:uid(),name:n});save();render()},
   master:async f=>{
-    const m=f.mc.value;
-    if(m.length<12){toast('Master Code minimal 12 karakter',true);return;}
-    if(!S.master){
+    const err=m=>{toast(m,true);};
+    const mc=f.mc.value;
+    const legacy=typeof S.master==='string';
+    /* Master Code minimal 12 karakter. */
+    if(mc.length<12){err('Master Code minimal 12 karakter');return;}
+    /* Legacy migration: verifikasi Master Code lama (input asli via legacyHash, bukan hash sebagai plaintext). */
+    if(legacy){
+      const mcOld=f.mcOld.value||'';
+      if(!mcOld)return err('Masukkan Master Code lama.');
+      /* Jangan asumsi hash lama sebagai plaintext. Verifikasi input asli pemilik melalui legacy verifier. */
+      if(legacyHash(mcOld)!==S.master)return err('Master Code lama salah.');
+      const mc2=f.mc2.value||'';
+      if(mc2!==mc)return err('Konfirmasi Master Code baru tidak cocok.');
       snapshotState();
-      S.master=await makeEnvelope(m);
+      S.master=await makeEnvelope(mc);
+      if(save()){toast('Master Code berhasil dimigrasikan');render();return;}
+      rollbackState();err('Gagal menyimpan Master Code baru. Master Code lama tetap berlaku.');
+      return;
+    }
+    if(!S.master){
+      /* First-time creation: baru + konfirmasi cocok. */
+      const mc2=f.mc2.value||'';
+      if(mc2!==mc)return err('Konfirmasi Master Code tidak cocok.');
+      snapshotState();
+      S.master=await makeEnvelope(mc);
       S.masterVerified=false;
-      if(save()){toast('Master Code disimpan');render();}else{rollbackState();toast('Gagal menyimpan Master Code',true);}
+      if(save()){toast('Master Code disimpan');render();}else{rollbackState();err('Gagal menyimpan Master Code');}
     }else if(!S.masterVerified){
-      if(S.masterLockUntil&&Date.now()<S.masterLockUntil){toast('Terkunci. Coba lagi nanti.',true);return;}
-      if(await verifyEnvelope(m,S.master)){S.masterVerified=true;S.masterFails=0;S.masterLockUntil=0;save();toast('Master Code diverifikasi');render();}
+      if(S.masterLockUntil&&Date.now()<S.masterLockUntil){err('Terkunci. Coba lagi nanti.');return;}
+      if(await verifyEnvelope(mc,S.master)){S.masterVerified=true;S.masterFails=0;S.masterLockUntil=0;save();toast('Master Code diverifikasi');render();}
       else{
         S.masterFails=(S.masterFails||0)+1;
-        if(S.masterFails>=3){S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();toast('Terlalu banyak percobaan. Terkunci 60 detik.',true);return;}
-        save();toast('Master Code salah',true);
+        if(S.masterFails>=3){S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();err('Terlalu banyak percobaan. Terkunci 60 detik.');return;}
+        save();err('Master Code salah');
       }
     }
   },
   pinstep:async f=>{
     const v=f.v.value,err=m=>{$('#psErr').innerHTML='<div class="note err">'+esc(m)+'</div>'};
-    if(pinStep.n===0){
-      if(!await verifyEnvelope(v,S.pin))return err('PIN lama salah.');
-      pinStep.old=v;pinStep.n=1;
-    }
-    else if(pinStep.n===1){if(!okPin(v))return err('PIN harus 4 sampai 6 angka.');pinStep.nw=v;pinStep.n=2}
-    else{
-      if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
-      snapshotState();
-      S.pin=await makeEnvelope(v);S.pinEnabled=true;
-      if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil diganti');render();return;}
-      rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
+    const setup=!S.pin;
+    if(setup){
+      if(pinStep.n===0){
+        if(!okPin(v))return err('PIN harus 4 sampai 6 angka.');
+        pinStep.nw=v;pinStep.n=1;
+      }else{
+        if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
+        snapshotState();
+        S.pin=await makeEnvelope(v);S.pinEnabled=true;
+        if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil dibuat. Area owner kini memerlukan PIN.');render();return;}
+        rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
+      }
+    }else{
+      if(pinStep.n===0){
+        if(!await verifyEnvelope(v,S.pin))return err('PIN lama salah.');
+        pinStep.old=v;pinStep.n=1;
+      }
+      else if(pinStep.n===1){if(!okPin(v))return err('PIN harus 4 sampai 6 angka.');pinStep.nw=v;pinStep.n=2}
+      else{
+        if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
+        snapshotState();
+        S.pin=await makeEnvelope(v);S.pinEnabled=true;
+        if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil diganti');render();return;}
+        rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
+      }
     }
     $('#pinBox').innerHTML=pinBoxHtml();$('#ps').focus();
   },
