@@ -237,7 +237,7 @@ function rollbackState(){
   }
 }
 function save(){
-  try{localStorage.setItem(KEY,JSON.stringify(S));return true}catch(e){memOnly=true;banner();rollbackState();return false}
+  try{localStorage.setItem(KEY,JSON.stringify(S));SNAPSHOT=null;return true}catch(e){memOnly=true;banner();rollbackState();return false}
 }
 
 /* ============ Logika inti (murni) ============ */
@@ -1075,7 +1075,13 @@ const F={
         if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
         snapshotState();
         S.pin=await makeEnvelope(v);S.pinEnabled=true;
-        if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil dibuat. Area owner kini memerlukan PIN.');render();return;}
+        if(save()){
+          pinStep={n:0,old:'',nw:''};
+          view.unlocked=false;
+          toast('PIN berhasil dibuat. Area owner kini memerlukan PIN.');
+          go('kasir');
+          return;
+        }
         rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
       }
     }else{
@@ -1088,7 +1094,12 @@ const F={
         if(v!==pinStep.nw)return err('Konfirmasi tidak sama dengan PIN baru.');
         snapshotState();
         S.pin=await makeEnvelope(v);S.pinEnabled=true;
-        if(save()){pinStep={n:0,old:'',nw:''};toast('PIN berhasil diganti');render();return;}
+        if(save()){
+          pinStep={n:0,old:'',nw:''};
+          toast('PIN berhasil diganti');
+          render();
+          return;
+        }
         rollbackState();err('Gagal menyimpan PIN. Coba lagi.');
       }
     }
