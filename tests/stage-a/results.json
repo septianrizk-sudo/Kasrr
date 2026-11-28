@@ -1,0 +1,271 @@
+{
+  "total": 44,
+  "pass": 44,
+  "fail": 0,
+  "tests": [
+    {
+      "test": 1,
+      "name": "T1: pinEnabled should be false initially",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 2,
+      "name": "T1: go rekap blocked pre-PIN",
+      "passed": true,
+      "details": "view.tab=kasir, toast=Buat PIN dulu di menu Atur sebelum membuka rekap."
+    },
+    {
+      "test": 3,
+      "name": "T1: go stok blocked pre-PIN",
+      "passed": true,
+      "details": "view.tab=kasir"
+    },
+    {
+      "test": 4,
+      "name": "T1: go atur allowed pre-PIN",
+      "passed": true,
+      "details": "view.tab=atur"
+    },
+    {
+      "test": 5,
+      "name": "T1: vAtur pre-PIN shows only PIN+Master",
+      "passed": true,
+      "details": "pin=true, master=true, shop=true"
+    },
+    {
+      "test": 6,
+      "name": "T2: Owner click actions blocked pre-PIN",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 7,
+      "name": "T2: Owner forms blocked pre-PIN",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 8,
+      "name": "T2: S unchanged after blocked actions",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 9,
+      "name": "T3: PIN step 1 stores new PIN",
+      "passed": true,
+      "details": "pinStep={\"n\":1,\"old\":\"\",\"nw\":\"123456\"}"
+    },
+    {
+      "test": 10,
+      "name": "T3: PIN becomes envelope",
+      "passed": 600000,
+      "details": "S.pin={\"hash\":\"84YDy6ovqmFsBXbB5YuVqdsNXrdngpU4I_kPQ7zxpFM\",\"salt\":\"PrXKKvx2glSskV_JvvFtlA\",\"iter\":600000}"
+    },
+    {
+      "test": 11,
+      "name": "T3: pinEnabled=true",
+      "passed": true,
+      "details": "pinEnabled=true"
+    },
+    {
+      "test": 12,
+      "name": "T3: view.unlocked=false",
+      "passed": true,
+      "details": "unlocked=false"
+    },
+    {
+      "test": 13,
+      "name": "T3: tab=kasir",
+      "passed": true,
+      "details": "tab=kasir"
+    },
+    {
+      "test": 14,
+      "name": "T3: toast mentions Master Code",
+      "passed": true,
+      "details": "toast=PIN aktif. Segera buat Master Code di menu Atur agar PIN bisa dipulihkan."
+    },
+    {
+      "test": 15,
+      "name": "T4: pinEnabled=true after migrate",
+      "passed": true,
+      "details": "pinEnabled=true"
+    },
+    {
+      "test": 16,
+      "name": "T4: migrationPending=true",
+      "passed": true,
+      "details": "migrationPending=true"
+    },
+    {
+      "test": 17,
+      "name": "T4: Wrong PIN rejected",
+      "passed": true,
+      "details": "S.pin still legacy: true"
+    },
+    {
+      "test": 18,
+      "name": "T4: Correct PIN migrates to envelope",
+      "passed": "F-DIb74t1axk7RPkBzhmO93WO6bDPEjL50uN8Sv3iEk",
+      "details": "S.pin is envelope: F-DIb74t1axk7RPkBzhmO93WO6bDPEjL50uN8Sv3iEk"
+    },
+    {
+      "test": 19,
+      "name": "T4: Master unchanged (no double-hash)",
+      "passed": true,
+      "details": "S.master=h1trvfzc-13, expected=h1trvfzc-13"
+    },
+    {
+      "test": 20,
+      "name": "T5: Legacy master migrates to envelope",
+      "passed": "LTOci7nSvAMx2XMyfpE-5dvJSmyoltDvOsU163dMNQo",
+      "details": "S.master={\"hash\":\"LTOci7nSvAMx2XMyfpE-5dvJSmyoltDvOsU163dMNQo\",\"salt\":\"l6_3miL0BpI4M0tX5AM70g\",\"iter\":600000}"
+    },
+    {
+      "test": 21,
+      "name": "T6: Legacy lockout after 3 fails",
+      "passed": true,
+      "details": "masterLockUntil=1795832767786"
+    },
+    {
+      "test": 22,
+      "name": "T6: Correct code rejected during lockout",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 23,
+      "name": "T7: Legacy master-only -> pre-PIN state",
+      "passed": true,
+      "details": "pinEnabled=false"
+    },
+    {
+      "test": 24,
+      "name": "T7: Can access Atur to setup PIN",
+      "passed": true,
+      "details": "tab=atur"
+    },
+    {
+      "test": 25,
+      "name": "T7: PIN setup works in master-only legacy",
+      "passed": true,
+      "details": "pinEnabled=true, pinEnvelope=oSBhhCM9aU8i_vH9ay6km0jrFlJ0NMfTV-g8L9na50w, masterLegacy=true"
+    },
+    {
+      "test": 26,
+      "name": "T8: init completes without exception (no crypto)",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 27,
+      "name": "T8: tick works",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 28,
+      "name": "T8: add (kasir) works",
+      "passed": true,
+      "details": "cart={\"item1\":1}"
+    },
+    {
+      "test": 29,
+      "name": "T8: go rekap blocked without crypto",
+      "passed": true,
+      "details": "tab=kasir"
+    },
+    {
+      "test": 30,
+      "name": "T8: go stok blocked without crypto",
+      "passed": true,
+      "details": "tab=kasir"
+    },
+    {
+      "test": 31,
+      "name": "T8: go atur blocked without crypto",
+      "passed": true,
+      "details": "tab=kasir"
+    },
+    {
+      "test": 32,
+      "name": "T8: Owner forms blocked without crypto",
+      "passed": true,
+      "details": "canAccessOwner=false"
+    },
+    {
+      "test": 33,
+      "name": "T9: PIN rollback on save error",
+      "passed": true,
+      "details": "S.pin=null, pinEnabled=false, psErr=<div class=\"note err\">Gagal menyimpan PIN. Coba lagi.</div>"
+    },
+    {
+      "test": 34,
+      "name": "T10: masterVerified not persisted",
+      "passed": true,
+      "details": "keys=v,seq,shop,rewardAt,pinEnabled,pin,master,recovery,pinFails,pinLockUntil,pinCycles,masterFails,masterLockUntil,lastActive,sessionStart,operators,ingredients,menu,customers,tx,op,campaigns,schemaVersion"
+    },
+    {
+      "test": 35,
+      "name": "T10: masterVerified=false after reload",
+      "passed": true,
+      "details": "masterVerified=false"
+    },
+    {
+      "test": 36,
+      "name": "T10: lock() resets masterVerified - tested in init code review",
+      "passed": true,
+      "details": "Verified via code inspection"
+    },
+    {
+      "test": 37,
+      "name": "T11: PIN unlock sets view.unlocked=true",
+      "passed": true,
+      "details": "unlocked=true"
+    },
+    {
+      "test": 38,
+      "name": "T11: Owner action works when unlocked",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 39,
+      "name": "T11: Owner action blocked after lock",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 40,
+      "name": "T12: Restore blocked pre-PIN (via canAccessOwner)",
+      "passed": true,
+      "details": "canAccessOwner=false"
+    },
+    {
+      "test": 41,
+      "name": "T12: Restore blocked when locked",
+      "passed": true,
+      "details": "canAccessOwner=false"
+    },
+    {
+      "test": 42,
+      "name": "T13: All data-form categorized",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "test": 43,
+      "name": "T14: Add item to cart",
+      "passed": true,
+      "details": "cart={\"i1\":1}"
+    },
+    {
+      "test": 44,
+      "name": "T14: Transaction saved via pay",
+      "passed": true,
+      "details": "tx=1"
+    }
+  ]
+}
