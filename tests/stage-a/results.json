@@ -1,6 +1,6 @@
 {
-  "total": 44,
-  "pass": 44,
+  "total": 72,
+  "pass": 72,
   "fail": 0,
   "tests": [
     {
@@ -61,7 +61,7 @@
       "test": 10,
       "name": "T3: PIN becomes envelope",
       "passed": 600000,
-      "details": "S.pin={\"hash\":\"84YDy6ovqmFsBXbB5YuVqdsNXrdngpU4I_kPQ7zxpFM\",\"salt\":\"PrXKKvx2glSskV_JvvFtlA\",\"iter\":600000}"
+      "details": "S.pin={\"hash\":\"6FowKpF98lLLtuQVKJQED266ETyCDU4fzr4GSgHZ2Vk\",\"salt\":\"EFWcGcWV2GTML_qL55N4FA\",\"iter\":600000}"
     },
     {
       "test": 11,
@@ -108,8 +108,8 @@
     {
       "test": 18,
       "name": "T4: Correct PIN migrates to envelope",
-      "passed": "F-DIb74t1axk7RPkBzhmO93WO6bDPEjL50uN8Sv3iEk",
-      "details": "S.pin is envelope: F-DIb74t1axk7RPkBzhmO93WO6bDPEjL50uN8Sv3iEk"
+      "passed": "CvO_n4sOR6hKh2-CF8vv8S80Bq6nRSBNT-tYliUTaac",
+      "details": "S.pin is envelope: CvO_n4sOR6hKh2-CF8vv8S80Bq6nRSBNT-tYliUTaac"
     },
     {
       "test": 19,
@@ -120,152 +120,320 @@
     {
       "test": 20,
       "name": "T5: Legacy master migrates to envelope",
-      "passed": "LTOci7nSvAMx2XMyfpE-5dvJSmyoltDvOsU163dMNQo",
-      "details": "S.master={\"hash\":\"LTOci7nSvAMx2XMyfpE-5dvJSmyoltDvOsU163dMNQo\",\"salt\":\"l6_3miL0BpI4M0tX5AM70g\",\"iter\":600000}"
+      "passed": "0pduI-qNAN0EHVDfQaTN52Ul_sdBV_uTIYUa3JOhYUA",
+      "details": "S.master={\"hash\":\"0pduI-qNAN0EHVDfQaTN52Ul_sdBV_uTIYUa3JOhYUA\",\"salt\":\"U3KSFYG6rFnbCzOkTC0lnA\",\"iter\":600000}"
     },
     {
       "test": 21,
       "name": "T6: Legacy lockout after 3 fails",
       "passed": true,
-      "details": "masterLockUntil=1795832767786"
+      "details": "masterLockUntil=1700000060000, now=1700000000000"
     },
     {
       "test": 22,
-      "name": "T6: Correct code rejected during lockout",
+      "name": "T6: Legacy correct code within 60s rejected and master unchanged",
       "passed": true,
-      "details": ""
+      "details": "masterLockUntil=1700000060000, master same=true"
     },
     {
       "test": 23,
+      "name": "T6: Legacy correct code after 61s accepted",
+      "passed": "CHoQ6PBgrMRbfmTi74-L_mpB5OMX9u1P_CgpyNdJjEA",
+      "details": "master={\"hash\":\"CHoQ6PBgrMRbfmTi74-L_mpB5OMX9u1P_CgpyNdJjEA\",\"salt\":\"57tuCeYeWNfyyihwA3KZZA\",\"iter\":600000}"
+    },
+    {
+      "test": 24,
+      "name": "T6: Envelope lockout after 3 fails",
+      "passed": true,
+      "details": "masterLockUntil=1700000060000"
+    },
+    {
+      "test": 25,
+      "name": "T6: Envelope correct code within 60s rejected and master unchanged",
+      "passed": true,
+      "details": "masterSame=true, verified=false"
+    },
+    {
+      "test": 26,
+      "name": "T6: Envelope correct code after 61s accepted",
+      "passed": true,
+      "details": "masterVerified=true"
+    },
+    {
+      "test": 27,
+      "name": "T6: Recovery step1 lockout after 3 fails",
+      "passed": true,
+      "details": "masterLockUntil=1700000060000, now=1700000000000"
+    },
+    {
+      "test": 28,
+      "name": "T6: Recovery step1 correct code within 60s rejected and master unchanged",
+      "passed": true,
+      "details": "masterSame=true"
+    },
+    {
+      "test": 29,
+      "name": "T6: Recovery step1 correct code after 61s accepted",
+      "passed": true,
+      "details": "recovery.step=2, masterVerified=false, lockUntil=0"
+    },
+    {
+      "test": 30,
       "name": "T7: Legacy master-only -> pre-PIN state",
       "passed": true,
       "details": "pinEnabled=false"
     },
     {
-      "test": 24,
+      "test": 31,
       "name": "T7: Can access Atur to setup PIN",
       "passed": true,
       "details": "tab=atur"
     },
     {
-      "test": 25,
+      "test": 32,
       "name": "T7: PIN setup works in master-only legacy",
       "passed": true,
-      "details": "pinEnabled=true, pinEnvelope=oSBhhCM9aU8i_vH9ay6km0jrFlJ0NMfTV-g8L9na50w, masterLegacy=true"
+      "details": "pinEnabled=true, pinEnvelope=_AFWnQpkKAhvxNhcp58ksM8PQmOcOOIYLpifzG8Mxsw, masterLegacy=true"
     },
     {
-      "test": 26,
+      "test": 33,
       "name": "T8: init completes without exception (no crypto)",
       "passed": true,
       "details": ""
     },
     {
-      "test": 27,
+      "test": 34,
       "name": "T8: tick works",
       "passed": true,
       "details": ""
     },
     {
-      "test": 28,
+      "test": 35,
       "name": "T8: add (kasir) works",
       "passed": true,
       "details": "cart={\"item1\":1}"
     },
     {
-      "test": 29,
+      "test": 36,
       "name": "T8: go rekap blocked without crypto",
       "passed": true,
       "details": "tab=kasir"
     },
     {
-      "test": 30,
+      "test": 37,
       "name": "T8: go stok blocked without crypto",
       "passed": true,
       "details": "tab=kasir"
     },
     {
-      "test": 31,
+      "test": 38,
       "name": "T8: go atur blocked without crypto",
       "passed": true,
       "details": "tab=kasir"
     },
     {
-      "test": 32,
+      "test": 39,
       "name": "T8: Owner forms blocked without crypto",
       "passed": true,
       "details": "canAccessOwner=false"
     },
     {
-      "test": 33,
+      "test": 40,
       "name": "T9: PIN rollback on save error",
       "passed": true,
       "details": "S.pin=null, pinEnabled=false, psErr=<div class=\"note err\">Gagal menyimpan PIN. Coba lagi.</div>"
     },
     {
-      "test": 34,
+      "test": 41,
       "name": "T10: masterVerified not persisted",
       "passed": true,
       "details": "keys=v,seq,shop,rewardAt,pinEnabled,pin,master,recovery,pinFails,pinLockUntil,pinCycles,masterFails,masterLockUntil,lastActive,sessionStart,operators,ingredients,menu,customers,tx,op,campaigns,schemaVersion"
     },
     {
-      "test": 35,
+      "test": 42,
       "name": "T10: masterVerified=false after reload",
       "passed": true,
       "details": "masterVerified=false"
     },
     {
-      "test": 36,
-      "name": "T10: lock() resets masterVerified - tested in init code review",
+      "test": 43,
+      "name": "T10: masterVerified=false after visibilitychange lock",
       "passed": true,
-      "details": "Verified via code inspection"
+      "details": "masterVerified=false"
     },
     {
-      "test": 37,
+      "test": 44,
+      "name": "T10: masterVerified=false after idle timer lock",
+      "passed": true,
+      "details": "masterVerified=false, idleFound=true"
+    },
+    {
+      "test": 45,
       "name": "T11: PIN unlock sets view.unlocked=true",
       "passed": true,
       "details": "unlocked=true"
     },
     {
-      "test": 38,
-      "name": "T11: Owner action works when unlocked",
+      "test": 46,
+      "name": "T11: Owner action works when unlocked (dispatcher)",
       "passed": true,
-      "details": ""
+      "details": "modalInnerLen=955"
     },
     {
-      "test": 39,
-      "name": "T11: Owner action blocked after lock",
+      "test": 47,
+      "name": "T11: Owner action blocked after lock (dispatcher)",
       "passed": true,
-      "details": ""
+      "details": "modalLen=0, sChanged=false"
     },
     {
-      "test": 40,
+      "test": 48,
       "name": "T12: Restore blocked pre-PIN (via canAccessOwner)",
       "passed": true,
       "details": "canAccessOwner=false"
     },
     {
-      "test": 41,
+      "test": 49,
       "name": "T12: Restore blocked when locked",
       "passed": true,
       "details": "canAccessOwner=false"
     },
     {
-      "test": 42,
-      "name": "T13: All data-form categorized",
+      "test": 50,
+      "name": "T13: All A keys and data-form categorized",
       "passed": true,
-      "details": ""
+      "details": "Akeys=44, forms=10"
     },
     {
-      "test": 43,
+      "test": 51,
       "name": "T14: Add item to cart",
       "passed": true,
-      "details": "cart={\"i1\":1}"
+      "details": "cartOk=true"
     },
     {
-      "test": 44,
+      "test": 52,
       "name": "T14: Transaction saved via pay",
       "passed": true,
+      "details": "txCount=1"
+    },
+    {
+      "test": 53,
+      "name": "T14: Stock decreased per recipe",
+      "passed": true,
+      "details": "stockBefore=100, stockAfter=90"
+    },
+    {
+      "test": 54,
+      "name": "T14: Regression vs 348103c identical",
+      "passed": true,
+      "details": "identical=true"
+    },
+    {
+      "test": 55,
+      "name": "T15: New user pinstep x2 via dispatcher -> pin envelope",
+      "passed": "t6qvVlYxINvXYaSmzwdBg-_T7vnuHlLs4AuYaQkjnnQ",
+      "details": "pin={\"hash\":\"t6qvVlYxINvXYaSmzwdBg-_T7vnuHlLs4AuYaQkjnnQ\",\"salt\":\"TPvmwWsyJueEKUQZcH4Ulw\",\"iter\":600000}"
+    },
+    {
+      "test": 56,
+      "name": "T15: pinEnabled=true",
+      "passed": true,
+      "details": "pinEnabled=true"
+    },
+    {
+      "test": 57,
+      "name": "T15: tab kasir",
+      "passed": true,
+      "details": "tab=kasir"
+    },
+    {
+      "test": 58,
+      "name": "T16: Pre-PIN master creation via dispatcher -> envelope stored",
+      "passed": "EUIk_vxRj3b-4Q9fL_UG2hNUf47XulwJxax1WL4kjc0",
+      "details": "master={\"hash\":\"EUIk_vxRj3b-4Q9fL_UG2hNUf47XulwJxax1WL4kjc0\",\"salt\":\"lJAQ9aDqUzUeJPvdRjyFdw\",\"iter\":600000}"
+    },
+    {
+      "test": 59,
+      "name": "T17: Legacy master-only pre-PIN migration via dispatcher",
+      "passed": "akGwZyGpRQaGmeZmOzjJv1qCrPWzxxW3iCcMVyU420o",
+      "details": "master={\"hash\":\"akGwZyGpRQaGmeZmOzjJv1qCrPWzxxW3iCcMVyU420o\",\"salt\":\"s2pXY_0teuvvMsrEZdyUGQ\",\"iter\":600000}"
+    },
+    {
+      "test": 60,
+      "name": "T18: Pre-PIN all owner A actions blocked via dispatcher, S identical",
+      "passed": true,
+      "details": "changed=false, ownerActs=21"
+    },
+    {
+      "test": 61,
+      "name": "T18: Pre-PIN owner forms ing/menu/shop/op blocked via dispatcher, S identical",
+      "passed": true,
+      "details": "changed=false"
+    },
+    {
+      "test": 62,
+      "name": "T19: restoreIn pre-PIN blocked via dispatcher, S unchanged",
+      "passed": true,
+      "details": "changed=false"
+    },
+    {
+      "test": 63,
+      "name": "T19: restoreIn pre-PIN input cleared",
+      "passed": true,
+      "details": "value="
+    },
+    {
+      "test": 64,
+      "name": "T19: restoreIn locked blocked via dispatcher, S unchanged",
+      "passed": true,
+      "details": "changed=false"
+    },
+    {
+      "test": 65,
+      "name": "T19: restoreIn locked input cleared",
+      "passed": true,
+      "details": "value="
+    },
+    {
+      "test": 66,
+      "name": "T20: add works without crypto (dispatcher)",
+      "passed": true,
+      "details": "cart={\"m1\":1}"
+    },
+    {
+      "test": 67,
+      "name": "T20: inc works without crypto (dispatcher)",
+      "passed": true,
+      "details": "cart={\"m1\":2}"
+    },
+    {
+      "test": 68,
+      "name": "T20: saverc works without crypto (dispatcher)",
+      "passed": true,
+      "details": "toast=Web Crypto tidak didukung - fitur owner tidak tersedia"
+    },
+    {
+      "test": 69,
+      "name": "T20: pay works without crypto (dispatcher)",
+      "passed": true,
       "details": "tx=1"
+    },
+    {
+      "test": 70,
+      "name": "T20: owner click/submit blocked without crypto (dispatcher)",
+      "passed": true,
+      "details": "changed=false"
+    },
+    {
+      "test": 71,
+      "name": "T20: stempel nav works without crypto",
+      "passed": true,
+      "details": "tab=stempel"
+    },
+    {
+      "test": 72,
+      "name": "T21: Locked with PIN - menumgr shows PIN modal (dispatcher)",
+      "passed": true,
+      "details": "modalLen=680"
     }
   ]
 }

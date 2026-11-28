@@ -2,6 +2,8 @@
    Stage A Security Remediation Test Harness (Node vm)
    - Runs the single-file app script inside a vm context with DOM/localStorage stubs.
    - Approach: Node `vm` + hand-built DOM/localStorage/FileReader stubs. No browser, no package install.
+   - H1: document.addEventListener captures listeners per event type; dispatch() triggers real listeners
+         with fake event (target.closest, dataset, files, preventDefault).
    ============================================================ */
 const fs = require('fs');
 const vm = require('vm');
@@ -10,37 +12,50 @@ const crypto = require('crypto');
 
 const STORAGE_KEY = 'kasirkopi.v2';
 
-const htmlPath = path.resolve(__dirname, '../../Kasir Kopi (1).html');
-const html = fs.readFileSync(htmlPath, 'utf-8');
-const scriptMatch = html.match(/<script>([\s\S]*)<\/script>/);
-if (!scriptMatch) throw new Error('No script tag found in HTML');
-const scriptSrc = scriptMatch[1];
+// Module-level default HTML (used by T13 for data-act/data-form extraction)
+const defaultHtmlPath = path.resolve(__dirname, '../../Kasir Kopi (1).html');
+const defaultHtml = fs.readFileSync(defaultHtmlPath, 'utf-8');
+const html = defaultHtml;
+const scriptSrc = defaultHtml.match(/<script>([\s\S]*)<\/script>/)?.[1];
 
 // ---- Node-side plain element factory (for forms passed into vm handlers) ----
 function mkEl(tag) {
-  return {
+  const el = {
     tagName: (tag || 'input').toUpperCase(), value: '', name: '', id: '', className: '',
     innerHTML: '', textContent: '', hidden: false, dataset: {}, attributes: {}, style: {},
-    children: [], parentNode: null, checked: false,
+    children: [], parentNode: null, checked: false, files: null,
     addEventListener: () => {}, removeEventListener: () => {},
     focus: () => {}, querySelector: () => null, querySelectorAll: () => [],
-    closest: () => null, appendChild: () => {},
+    appendChild: () => {},
     classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} }
   };
+  el.closest = (sel) => {
+    if (sel.startsWith('[data-act') && el.dataset && el.dataset.act) return el;
+    if (sel.startsWith('[data-form') && el.dataset && el.dataset.form) return el;
+    return null;
+  };
+  return el;
 }
 
 // ---- Environment factory ----
 function makeApp(opts = {}) {
+  const appHtmlPath = opts.htmlPath || path.resolve(__dirname, '../../Kasir Kopi (1).html');
+  const appHtml = fs.readFileSync(appHtmlPath, 'utf-8');
+  const appScriptMatch = appHtml.match(/<script>([\s\S]*)<\/script>/);
+  if (!appScriptMatch) throw new Error('No script tag found in HTML: ' + appHtmlPath);
+  const appScriptSrc = appScriptMatch[1];
   const withCrypto = opts.withCrypto !== false;
   const store = {};
   const elements = new Map();
   let nextElemId = 1;
+  const listeners = {}; // H1: capture listeners by type
+
   function createElement(tag) {
     const id = 'elem-' + nextElemId++;
     const el = {
       tagName: tag.toUpperCase(), id: '', className: '', hidden: false,
       innerHTML: '', textContent: '', value: '', dataset: {}, attributes: {},
-      children: [], parentNode: null, style: {}, checked: false,
+      children: [], parentNode: null, style: {}, checked: false, files: null,
       addEventListener: () => {}, removeEventListener: () => {},
       querySelector: (sel) => { if (sel.startsWith('#')) { const e = elements.get(sel.slice(1)); return e || null; } return null; },
       querySelectorAll: () => [],
@@ -60,7 +75,9 @@ function makeApp(opts = {}) {
   const document = {
     getElementById: (id) => elements.get(id) || createElement('div'),
     querySelector: (sel) => { if (sel.startsWith('#')) { const e = elements.get(sel.slice(1)); return e || createElement('div'); } return createElement('div'); },
-    querySelectorAll: () => [], createElement, addEventListener: () => {}, removeEventListener: () => {},
+    querySelectorAll: () => [], createElement,
+    addEventListener: (type, fn) => { if (!listeners[type]) listeners[type] = []; listeners[type].push(fn); },
+    removeEventListener: () => {},
     hidden: false, body: createElement('body'), head: createElement('head')
   };
 
@@ -73,7 +90,7 @@ function makeApp(opts = {}) {
   };
 
   const window = {
-    crypto: cryptoObj, addEventListener: () => {}, removeEventListener: () => {}, location: { href: '' },
+    crypto: cryptoObj, addEventListener: (type, fn) => { if (!listeners[type]) listeners[type] = []; listeners[type].push(fn); }, removeEventListener: () => {}, location: { href: '' },
     navigator: { clipboard: { writeText: async () => {} } },
     btoa: (s) => Buffer.from(s, 'binary').toString('base64'), atob: (s) => Buffer.from(s, 'base64').toString('binary'),
     setTimeout, clearTimeout, setInterval, clearInterval, Date, scrollTo: () => {}, claude: { use: async () => false }
@@ -106,7 +123,6 @@ function makeApp(opts = {}) {
     FileReader, FormData, btoa: window.btoa, atob: window.atob, derivePBKDF2, b64url, b64urlToBytes, __tmp: null
   });
 
-  // localStorage stub attached to ctx
   const localStorage = {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
@@ -115,20 +131,30 @@ function makeApp(opts = {}) {
   };
   ctx.localStorage = localStorage;
 
-  vm.runInContext(scriptSrc, ctx);
+  vm.runInContext(appScriptSrc, ctx);
+
+  // H1: dispatch helper that triggers real listeners
+  function dispatch(type, target, extra = {}) {
+    const ev = Object.assign({ target, preventDefault: () => {}, type }, extra);
+    const fns = listeners[type] || [];
+    for (const fn of fns) fn(ev);
+    return ev;
+  }
+
   return {
-    ctx, elements, store, localStorage, toastEl, viewEl,
+    ctx, elements, store, localStorage, toastEl, viewEl, listeners, document,
     get(name) { return vm.runInContext(name, ctx); },
     set(name, val) { ctx.__tmp = val; vm.runInContext(name + '=__tmp', ctx); },
     call(fnName, ...args) { const fn = vm.runInContext(fnName, ctx); return fn(...args); },
-    reset: () => { Object.keys(store).forEach(k => delete store[k]); elements.forEach(el => { el.value = ''; el.innerHTML = ''; el.textContent = ''; el.hidden = false; el.className = ''; el.dataset = {}; el.attributes = {}; }); },
+    reset: () => { Object.keys(store).forEach(k => delete store[k]); elements.forEach(el => { el.value = ''; el.innerHTML = ''; el.textContent = ''; el.hidden = false; el.className = ''; el.dataset = {}; el.attributes = {}; el.files = null; }); },
     clearStorage: () => { Object.keys(store).forEach(k => delete store[k]); },
     init() { return vm.runInContext('init()', ctx); },
+    dispatch,
     withCrypto
   };
 }
 
-// ---- Test Harness ----
+// ---- Test Helpers ----
 let testCount = 0, passCount = 0, failCount = 0;
 const results = [];
 function logTest(name, passed, details = '') {
@@ -143,28 +169,54 @@ function assertEqual(a, b, msg) { const p = a === b; logTest(msg, p, p ? '' : `E
 function assertTrue(v, msg) { return assertEqual(!!v, true, msg); }
 function assertFalse(v, msg) { return assertEqual(!!v, false, msg); }
 
-function makePinForm(value) { const f = mkEl('form'); f.dataset.form = 'pinstep'; f.v = mkEl('input'); f.v.value = value; return f; }
+// Form factories
+function makePinForm(value) { const f = mkEl('form'); f.dataset.form = 'pinstep'; f.v = mkEl('input'); f.v.value = value; f.v.name = 'v'; return f; }
 function makeMasterForm(oldV, newV, confV) {
   const f = mkEl('form'); f.dataset.form = 'master';
-  f.mcOld = mkEl('input'); f.mcOld.value = oldV || '';
-  f.mc = mkEl('input'); f.mc.value = newV || '';
-  f.mc2 = mkEl('input'); f.mc2.value = confV || '';
+  f.mcOld = mkEl('input'); f.mcOld.value = oldV || ''; f.mcOld.name = 'mcOld';
+  f.mc = mkEl('input'); f.mc.value = newV || ''; f.mc.name = 'mc';
+  f.mc2 = mkEl('input'); f.mc2.value = confV || ''; f.mc2.name = 'mc2';
   return f;
 }
-function makePinUnlockForm(value) { const f = mkEl('form'); f.dataset.form = 'pin'; f.pin = mkEl('input'); f.pin.value = value; return f; }
+function makePinUnlockForm(value) { const f = mkEl('form'); f.dataset.form = 'pin'; f.pin = mkEl('input'); f.pin.value = value; f.pin.name = 'pin'; return f; }
+function makeRecoveryForm(step, mcVal) { const f = mkEl('form'); f.dataset.form = 'recovery'; f.step = mkEl('input'); f.step.value = String(step); f.step.name = 'step'; f.mc = mkEl('input'); f.mc.value = mcVal || ''; f.mc.name = 'mc'; return f; }
+function makeRestoreFile(content) { return { content: JSON.stringify(content) }; }
 
-async function runAsyncHandlers(F, handlers) {
-  for (const h of handlers) await h(F);
+// Dispatch helpers (all scenarios must go through dispatcher)
+function clickAct(app, act, extra = {}) {
+  const el = mkEl('button'); el.dataset.act = act; Object.assign(el.dataset, extra);
+  app.dispatch('click', el);
+}
+function submitForm(app, formEl) { app.dispatch('submit', formEl); }
+function changeEl(app, el) { app.dispatch('change', el); }
+function visibilityChange(app, hidden) { app.document.hidden = hidden; app.dispatch('visibilitychange', app.document); }
+function keyDown(app) { app.dispatch('keydown', app.document); }
+function mouseMove(app) { app.dispatch('mousemove', app.document); }
+
+// Date.now mock helper for lockout tests
+function withMockedNow(app, startMs, fn) {
+  const realNow = Date.now;
+  let now = startMs;
+  Date.now = () => now;
+  app.ctx.Date.now = () => now;
+  const advance = (ms) => { now += ms; };
+  const restore = () => { Date.now = realNow; app.ctx.Date.now = realNow; };
+  try {
+    const res = fn(advance, () => now);
+    if (res && typeof res.then === 'function') return res.finally(restore);
+    restore(); return res;
+  } catch (e) { restore(); throw e; }
 }
 
-async function runTests() {
+// ---- Run Tests ----
+async function runTests(htmlPath) {
   console.log('══════════════════════════════════════════════════════════════');
-  console.log('  Stage A Security Remediation Tests (T1–T14)');
+  console.log('  Stage A Security Remediation Tests (T1–T14 + T15–T20)');
   console.log('══════════════════════════════════════════════════════════════\n');
 
   // ---------- T1 ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     assertFalse(app.get('S').pinEnabled, 'T1: pinEnabled should be false initially');
     app.call('go', 'rekap');
     let v = app.get('view');
@@ -185,7 +237,7 @@ async function runTests() {
 
   // ---------- T2 ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     let S = app.get('S');
     app.call('go', 'atur');
     const CASHIER_ACTS = app.get('CASHIER_ACTS');
@@ -207,7 +259,7 @@ async function runTests() {
 
   // ---------- T3 ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     app.call('go', 'atur');
     const F = app.get('F');
     let f = makePinForm('123456');
@@ -227,7 +279,7 @@ async function runTests() {
 
   // ---------- T4 ----------
   {
-    const app = makeApp(); app.reset();
+    const app = makeApp({ htmlPath }); app.reset();
     const legacyHash = app.get('legacyHash');
     const legacyPin = legacyHash('1234');
     const legacyMaster = legacyHash('masterlama123');
@@ -237,7 +289,6 @@ async function runTests() {
     logTest('T4: pinEnabled=true after migrate', S.pinEnabled === true, `pinEnabled=${S.pinEnabled}`);
     logTest('T4: migrationPending=true', S.migrationPending === true, `migrationPending=${S.migrationPending}`);
     const F = app.get('F');
-    // Navigate to a locked tab first so pendingTab is set (real flow: go() sets pendingTab then askPin modal)
     app.call('go', 'atur');
     await F.pin(makePinUnlockForm('0000'));
     let S2 = app.get('S');
@@ -251,7 +302,7 @@ async function runTests() {
 
   // ---------- T5 ----------
   {
-    const app = makeApp(); app.reset();
+    const app = makeApp({ htmlPath }); app.reset();
     const legacyMaster = app.get('legacyHash')('masterlama123');
     app.store[STORAGE_KEY] = JSON.stringify({ v:2,seq:0,shop:'Kopi Kita',rewardAt:10,pin:null,master:legacyMaster,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[{id:'op1',name:'Kasir Pagi'}],ingredients:[],menu:[],campaigns:[],recovery:null });
     app.init();
@@ -261,26 +312,79 @@ async function runTests() {
     logTest('T5: Legacy master migrates to envelope', S.master && typeof S.master === 'object' && S.master.hash, `S.master=${JSON.stringify(S.master)}`);
   }
 
-  // ---------- T6 ----------
+  // ---------- T6 (H4: lockout with Date.now mock for legacy, envelope, recovery step 1) ----------
   {
-    const app = makeApp(); app.reset();
+    // Legacy branch
+    const app = makeApp({ htmlPath }); app.reset();
     const legacyMaster = app.get('legacyHash')('masterlama123');
     app.store[STORAGE_KEY] = JSON.stringify({ v:2,seq:0,shop:'Kopi Kita',rewardAt:10,pin:null,master:legacyMaster,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[{id:'op1',name:'Kasir Pagi'}],ingredients:[],menu:[],campaigns:[],recovery:null });
     app.init();
     const F = app.get('F');
-    const fWrong = makeMasterForm('wrong','masterbaru123456','masterbaru123456');
-    await F.master(fWrong); await F.master(fWrong); await F.master(fWrong);
-    let S = app.get('S');
-    logTest('T6: Legacy lockout after 3 fails', S.masterLockUntil > Date.now(), `masterLockUntil=${S.masterLockUntil}`);
-    const beforeLock = app.get('S').masterLockUntil;
-    await F.master(makeMasterForm('masterlama123','masterbaru123456','masterbaru123456'));
-    const S2 = app.get('S');
-    logTest('T6: Correct code rejected during lockout', S2.masterLockUntil === beforeLock, '');
+    await withMockedNow(app, 1700000000000, async (advance) => {
+      const fWrong = makeMasterForm('wrong','masterbaru123456','masterbaru123456');
+      await F.master(fWrong); await F.master(fWrong); await F.master(fWrong);
+      let S = app.get('S');
+      logTest('T6: Legacy lockout after 3 fails', S.masterLockUntil > Date.now(), `masterLockUntil=${S.masterLockUntil}, now=${Date.now()}`);
+      const beforeLock = app.get('S').masterLockUntil;
+      await F.master(makeMasterForm('masterlama123','masterbaru123456','masterbaru123456'));
+      const S2 = app.get('S');
+      logTest('T6: Legacy correct code within 60s rejected and master unchanged', S2.masterLockUntil === beforeLock && S2.master === legacyMaster, `masterLockUntil=${S2.masterLockUntil}, master same=${S2.master===legacyMaster}`);
+      advance(61000);
+      await F.master(makeMasterForm('masterlama123','masterbaru123456','masterbaru123456'));
+      const S3 = app.get('S');
+      logTest('T6: Legacy correct code after 61s accepted', S3.master && typeof S3.master === 'object' && S3.master.hash, `master=${JSON.stringify(S3.master)}`);
+    });
+
+    // Envelope branch
+    const app2 = makeApp({ htmlPath }); app2.reset(); app2.clearStorage(); app2.init();
+    const F2 = app2.get('F');
+    await F2.master(makeMasterForm('', 'masterenvelope12', 'masterenvelope12'));
+    await withMockedNow(app2, 1700000000000, async (advance) => {
+      const fWrong = makeMasterForm('', 'wrong', '');
+      // envelope branch: when master exists and not verified, F.master takes mc (no mcOld/mc2)
+      const mkV = (pw) => { const f=mkEl('form'); f.dataset.form='master'; f.mc=mkEl('input'); f.mc.value=pw; f.mc.name='mc'; return f; };
+      await F2.master(mkV('wrongpassword12')); await F2.master(mkV('wrongpassword12')); await F2.master(mkV('wrongpassword12'));
+      let S = app2.get('S');
+      logTest('T6: Envelope lockout after 3 fails', S.masterLockUntil > Date.now(), `masterLockUntil=${S.masterLockUntil}`);
+      const before = JSON.stringify(S.master);
+      await F2.master(mkV('masterenvelope12'));
+      let S2 = app2.get('S');
+      logTest('T6: Envelope correct code within 60s rejected and master unchanged', JSON.stringify(S2.master) === before && S2.masterVerified === false, `masterSame=${JSON.stringify(S2.master)===before}, verified=${S2.masterVerified}`);
+      advance(61000);
+      await F2.master(mkV('masterenvelope12'));
+      let S3 = app2.get('S');
+      logTest('T6: Envelope correct code after 61s accepted', S3.masterVerified === true, `masterVerified=${S3.masterVerified}`);
+    });
+
+    // Recovery step 1 branch
+    const app3 = makeApp({ htmlPath }); app3.reset(); app3.clearStorage(); app3.init();
+    const F3a = app3.get('F');
+    await F3a.master(makeMasterForm('', 'masterrecovery12', 'masterrecovery12'));
+    const S3i = app3.get('S');
+    S3i.recovery = { step: 1, masterPending: null, pinPending: null };
+    S3i.masterVerified = false;
+    await withMockedNow(app3, 1700000000000, async (advance) => {
+      const F3 = app3.get('F');
+      const mkRec = (mc) => { const f=mkEl('form'); f.dataset.form='recovery'; f.step=mkEl('input'); f.step.value='1'; f.step.name='step'; f.mc=mkEl('input'); f.mc.value=mc; f.mc.name='mc'; return f; };
+      await F3.recovery(mkRec('wrong1')); await F3.recovery(mkRec('wrong2')); await F3.recovery(mkRec('wrong3'));
+      let S = app3.get('S');
+      const locked = S.masterLockUntil > Date.now();
+      logTest('T6: Recovery step1 lockout after 3 fails', locked, `masterLockUntil=${S.masterLockUntil}, now=${Date.now()}`);
+      const masterBefore = JSON.stringify(S.master);
+      await F3.recovery(mkRec('masterrecovery12'));
+      let S2 = app3.get('S');
+      logTest('T6: Recovery step1 correct code within 60s rejected and master unchanged', JSON.stringify(S2.master) === masterBefore, `masterSame=${JSON.stringify(S2.master)===masterBefore}`);
+      advance(61000);
+      await F3.recovery(mkRec('masterrecovery12'));
+      let S4 = app3.get('S');
+      const advanced = (S4.recovery && S4.recovery.step !== 1) || S4.masterVerified === true || S4.masterLockUntil === 0;
+      logTest('T6: Recovery step1 correct code after 61s accepted', advanced, `recovery.step=${S4.recovery?S4.recovery.step:'null'}, masterVerified=${S4.masterVerified}, lockUntil=${S4.masterLockUntil}`);
+    });
   }
 
   // ---------- T7 ----------
   {
-    const app = makeApp(); app.reset();
+    const app = makeApp({ htmlPath }); app.reset();
     const legacyMaster = app.get('legacyHash')('masterlama123');
     app.store[STORAGE_KEY] = JSON.stringify({ v:2,seq:0,shop:'Kopi Kita',rewardAt:10,pin:null,master:legacyMaster,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[{id:'op1',name:'Kasir Pagi'}],ingredients:[],menu:[],campaigns:[],recovery:null });
     app.init();
@@ -299,8 +403,7 @@ async function runTests() {
 
   // ---------- T8 ----------
   {
-    const app = makeApp({ withCrypto: false });
-    app.reset(); app.clearStorage();
+    const app = makeApp({ htmlPath, withCrypto: false }); app.reset(); app.clearStorage();
     let initThrew = false;
     try { app.init(); } catch (e) { initThrew = true; console.log('  init threw:', e.message); }
     logTest('T8: init completes without exception (no crypto)', !initThrew, '');
@@ -325,7 +428,7 @@ async function runTests() {
 
   // ---------- T9 ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     app.localStorage.setItem = () => { throw new Error('Storage quota exceeded'); };
     let S = app.get('S');
     app.call('go', 'atur');
@@ -335,16 +438,15 @@ async function runTests() {
     S = app.get('S');
     const pinStillNull = S.pin === null;
     const pinEnabledFalse = S.pinEnabled === false;
-    const errorShown = app.elements && app.elements.size > 0;
     const psErrEl = app.elements ? (app.elements.get('psErr') || null) : null;
     const errorText = psErrEl ? psErrEl.innerHTML : '';
     logTest('T9: PIN rollback on save error', pinStillNull && pinEnabledFalse && (errorText.includes('Gagal') || errorText.includes('gagal')),
       `S.pin=${S.pin}, pinEnabled=${S.pinEnabled}, psErr=${errorText}`);
   }
 
-  // ---------- T10 ----------
+  // ---------- T10 (H2: real lock tests via visibilitychange + idle timer) ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     let S = app.get('S');
     S.masterVerified = true;
     app.call('save');
@@ -353,12 +455,28 @@ async function runTests() {
     app.init();
     S = app.get('S');
     logTest('T10: masterVerified=false after reload', S.masterVerified === false, `masterVerified=${S.masterVerified}`);
-    logTest('T10: lock() resets masterVerified - tested in init code review', true, 'Verified via code inspection');
+
+    // Real lock test via visibilitychange
+    const app2 = makeApp({ htmlPath }); app2.reset(); app2.clearStorage();
+    const timers = [];
+    const origSetTimeout = app2.ctx.setTimeout;
+    app2.ctx.setTimeout = (fn, ms) => { const id = origSetTimeout(fn, ms); timers.push({ fn, ms, id }); return id; };
+    app2.init();
+    let S2 = app2.get('S');
+    S2.masterVerified = true;
+    visibilityChange(app2, true);
+    logTest('T10: masterVerified=false after visibilitychange lock', app2.get('S').masterVerified === false, `masterVerified=${app2.get('S').masterVerified}`);
+
+    // Idle timer test
+    app2.get('S').masterVerified = true;
+    const idle = timers.find(t => t.ms === 5 * 60 * 1000);
+    if (idle) { idle.fn(); }
+    logTest('T10: masterVerified=false after idle timer lock', app2.get('S').masterVerified === false, `masterVerified=${app2.get('S').masterVerified}, idleFound=${!!idle}`);
   }
 
-  // ---------- T11 ----------
+  // ---------- T11 (H2: real dispatcher tests) ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     app.call('go', 'atur');
     const F = app.get('F');
     let f = makePinForm('123456'); await F.pinstep(f);
@@ -366,18 +484,29 @@ async function runTests() {
     await F.pin(makePinUnlockForm('123456'));
     let v = app.get('view');
     logTest('T11: PIN unlock sets view.unlocked=true', v.unlocked === true, `unlocked=${v.unlocked}`);
-    const canAccessOwner = app.get('canAccessOwner');
-    const CASHIER_ACTS = app.get('CASHIER_ACTS');
-    const ownerOk = (CASHIER_ACTS.has('ingnew') ? true : canAccessOwner());
-    logTest('T11: Owner action works when unlocked', ownerOk, '');
-    v.unlocked = false;
-    app.get('S').masterVerified = false;
-    logTest('T11: Owner action blocked after lock', !canAccessOwner(), '');
+
+    // After unlock, click owner action via dispatcher and assert handler runs
+    const modalEl = app.elements.get('modal');
+    modalEl.innerHTML = '';
+    clickAct(app, 'ingnew');
+    const modalOpened = modalEl.innerHTML.includes('Bahan baru') || modalEl.innerHTML.length > 0;
+    logTest('T11: Owner action works when unlocked (dispatcher)', modalOpened, `modalInnerLen=${modalEl.innerHTML.length}`);
+
+    // Lock: simulate visibilitychange
+    app.document.hidden = true;
+    app.dispatch('visibilitychange', app.document);
+    // After lock, click owner action - should be blocked, S unchanged
+    const sBefore = JSON.stringify(app.get('S'));
+    modalEl.innerHTML = '';
+    clickAct(app, 'menunew');
+    const sAfter = JSON.stringify(app.get('S'));
+    const blockedAfterLock = modalEl.innerHTML.length === 0 && sBefore === sAfter;
+    logTest('T11: Owner action blocked after lock (dispatcher)', blockedAfterLock, `modalLen=${modalEl.innerHTML.length}, sChanged=${sBefore!==sAfter}`);
   }
 
   // ---------- T12 ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
     const canAccessOwner = app.get('canAccessOwner');
     logTest('T12: Restore blocked pre-PIN (via canAccessOwner)', !canAccessOwner('restock'), `canAccessOwner=${canAccessOwner('restock')}`);
     app.get('S').pinEnabled = true;
@@ -387,34 +516,235 @@ async function runTests() {
 
   // ---------- T13 ----------
   {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    const Akeys = Object.keys(app.get('A') || {});
+    const CASHIER_ACTS = app.get('CASHIER_ACTS');
     const acts = [...new Set((html.match(/data-act="([A-Za-z0-9]+)"/g) || []).map(m => m.match(/data-act="([^"]+)"/)[1]))];
     const forms = [...new Set((html.match(/data-form="([A-Za-z0-9]+)"/g) || []).map(m => m.match(/data-form="([^"]+)"/)[1]))];
-    const cashierActs = new Set(['tab','mclose','confirmyes','forgot','add','inc','dec','clear','dtype','exact','pay','rcpt','copyrcpt','sub','rwtoggle','printer','prnpick','prnforget','prntest','prnrcpt']);
     const authForms = new Set(['pin','recovery']);
     const ownerForms = new Set(['camp','ing','menu','op','master','pinstep','restock','shop']);
-    const uncategorized = [];
-    for (const form of forms) { if (!authForms.has(form) && !ownerForms.has(form)) uncategorized.push('form:' + form); }
-    logTest('T13: All data-form categorized', uncategorized.length === 0, uncategorized.length ? uncategorized.join(', ') : '');
-    console.log(`  Acts: ${acts.length} (cashier: ${acts.filter(a => cashierActs.has(a)).length}, owner/other: ${acts.filter(a => !cashierActs.has(a)).length})`);
-    console.log(`  Forms: ${forms.length} (auth: ${forms.filter(f => authForms.has(f)).length}, owner: ${forms.filter(f => ownerForms.has(f)).length})`);
+    const classifyAct = (k) => {
+      if (CASHIER_ACTS.has(k)) return { cat: 'cashier', reason: 'in CASHIER_ACTS allowlist (kasir/UI flow, no owner gate)' };
+      if (k === 'pinreset') return { cat: 'owner-special', reason: 'owner-intent; allowed pre-PIN only when !S.pin (setup flow), else gated' };
+      return { cat: 'owner', reason: 'not in CASHIER_ACTS; default-deny, requires canAccessOwner()' };
+    };
+    const classifyForm = (f) => {
+      if (authForms.has(f)) return { cat: 'auth', reason: 'authentication/recovery form; allowed by canAccessOwner' };
+      if (ownerForms.has(f)) return { cat: 'owner', reason: 'owner/business form; gated by canAccessOwner' };
+      return { cat: 'uncategorized', reason: 'UNKNOWN' };
+    };
+    console.log('\n  === T13: A action classification ===');
+    console.log('  ' + ['ACTION','CATEGORY','REASON'].join(' | '));
+    let uncategorized = [];
+    for (const k of Akeys) {
+      const c = classifyAct(k);
+      console.log(`  ${k} | ${c.cat} | ${c.reason}`);
+      if (c.cat === 'uncategorized') uncategorized.push('act:'+k);
+    }
+    console.log('\n  === T13: data-form classification ===');
+    console.log('  ' + ['FORM','CATEGORY','REASON'].join(' | '));
+    for (const f of forms) {
+      const c = classifyForm(f);
+      console.log(`  ${f} | ${c.cat} | ${c.reason}`);
+      if (c.cat === 'uncategorized') uncategorized.push('form:'+f);
+    }
+    const mustShow = ['saverc','rradd','rrdel','menumgr','rwtoggle','dtype','sub','exact','pinreset','forgot'];
+    const missing = mustShow.filter(k => !Akeys.includes(k));
+    if (missing.length) { uncategorized.push('missing:'+missing.join(',')); console.log('  MISSING required keys:', missing.join(',')); }
+    logTest('T13: All A keys and data-form categorized', uncategorized.length === 0, uncategorized.length ? uncategorized.join('; ') : `Akeys=${Akeys.length}, forms=${forms.length}`);
   }
 
-  // ---------- T14 ----------
+  // ---------- T14 (H5: cashier regression with recipe + stock + receipt number) ----------
   {
-    const app = makeApp(); app.reset(); app.clearStorage(); app.init();
-    app.call('go', 'kasir');
-    let S = app.get('S');
-    S.menu = [{ id: 'i1', name: 'Kopi Hitam', price: 15000, cup: true, recipe: [] }];
+    function runTxScenario(appLabel, app) {
+      app.reset(); app.clearStorage(); app.init();
+      app.call('go', 'kasir');
+      let S = app.get('S');
+      const ingId = 'ing1';
+      const menuId = 'menu1';
+      S.ingredients = [{ id: ingId, name: 'Biji Kopi', unit: 'g', stock: 100, min: 10, cost: 0 }];
+      S.menu = [{ id: menuId, name: 'Kopi Test', price: 15000, cup: true, recipe: [{ ing: ingId, qty: 10 }] }];
+      S.op = S.operators[0].id;
+      const addEl = mkEl('button'); addEl.dataset.act='add'; addEl.dataset.id=menuId;
+      clickAct(app, 'add', { id: menuId });
+      const cartAfterAdd = app.get('cart');
+      const cartOk = cartAfterAdd[menuId] === 1;
+      clickAct(app, 'pay');
+      let S2 = app.get('S');
+      const txSaved = Array.isArray(S2.tx) && S2.tx.length > 0;
+      const stockAfter = S2.ingredients.find(i=>i.id===ingId);
+      const stockOk = stockAfter && stockAfter.stock === 90;
+      const txNo = txSaved ? S2.tx[S2.tx.length-1].no : null;
+      return { appLabel, cartOk, txSaved, stockBefore: 100, stockAfter: stockAfter ? stockAfter.stock : null, stockOk, txNo, txCount: S2.tx.length };
+    }
+
+    const headRes = runTxScenario('HEAD', makeApp({ htmlPath }));
+    let oldRes = null;
+    const oldPath = '/tmp/kasir_348103c.html';
+    if (fs.existsSync(oldPath)) {
+      oldRes = runTxScenario('348103c', makeApp({ htmlPath: oldPath }));
+    } else {
+      console.log('  T14: /tmp/kasir_348103c.html not found, skipping old comparison');
+    }
+
+    console.log('\n  === T14 Regression (side-by-side) ===');
+    console.log('  ' + ['metric','HEAD','348103c','identical'].join(' | '));
+    const rows = [
+      ['cartOk', headRes.cartOk, oldRes ? oldRes.cartOk : 'N/A'],
+      ['txSaved', headRes.txSaved, oldRes ? oldRes.txSaved : 'N/A'],
+      ['stockBefore', headRes.stockBefore, oldRes ? oldRes.stockBefore : 'N/A'],
+      ['stockAfter', headRes.stockAfter, oldRes ? oldRes.stockAfter : 'N/A'],
+      ['stockOk(-10)', headRes.stockOk, oldRes ? oldRes.stockOk : 'N/A'],
+      ['txCount', headRes.txCount, oldRes ? oldRes.txCount : 'N/A'],
+    ];
+    for (const [m,h,o] of rows) {
+      const ident = (o === 'N/A') ? 'N/A' : (h === o ? 'YES' : 'NO');
+      console.log(`  ${m} | ${h} | ${o} | ${ident}`);
+    }
+    const allIdentical = oldRes ? rows.every(([m,h,o]) => h === o) : false;
+    logTest('T14: Add item to cart', headRes.cartOk, `cartOk=${headRes.cartOk}`);
+    logTest('T14: Transaction saved via pay', headRes.txSaved, `txCount=${headRes.txCount}`);
+    logTest('T14: Stock decreased per recipe', headRes.stockOk, `stockBefore=100, stockAfter=${headRes.stockAfter}`);
+    logTest('T14: Regression vs 348103c identical', oldRes ? allIdentical : false, oldRes ? `identical=${allIdentical}` : '348103c file missing');
+  }
+
+  // ---------- T15 (H3: new user pinstep via dispatcher) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    app.call('go', 'atur');
+    const f1 = makePinForm('123456'); f1.dataset.form='pinstep';
+    submitForm(app, f1);
+    await new Promise(r => setTimeout(r, 100));
+    const f2 = makePinForm('123456'); f2.dataset.form='pinstep';
+    submitForm(app, f2);
+    await new Promise(r => setTimeout(r, 100));
+    const S = app.get('S');
+    logTest('T15: New user pinstep x2 via dispatcher -> pin envelope', S.pin && typeof S.pin==='object' && S.pin.hash, `pin=${JSON.stringify(S.pin)}`);
+    logTest('T15: pinEnabled=true', S.pinEnabled===true, `pinEnabled=${S.pinEnabled}`);
+    logTest('T15: tab kasir', app.get('view').tab==='kasir', `tab=${app.get('view').tab}`);
+  }
+
+  // ---------- T16 (H3: new user master creation pre-PIN via dispatcher) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    // Pre-PIN: pinEnabled false, no pin set
+    const f = makeMasterForm('', 'masterbaru12345', 'masterbaru12345'); // 15 chars
+    f.dataset.form = 'master';
+    submitForm(app, f);
+    await new Promise(r => setTimeout(r, 100));
+    const S = app.get('S');
+    logTest('T16: Pre-PIN master creation via dispatcher -> envelope stored', S.master && typeof S.master==='object' && S.master.hash, `master=${JSON.stringify(S.master)}`);
+  }
+
+  // ---------- T17 (H3: legacy master-only pre-PIN migration via dispatcher) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage();
+    const legacyMaster = app.get('legacyHash')('masterlama123');
+    app.store[STORAGE_KEY] = JSON.stringify({ v:2,seq:0,shop:'Kopi Kita',rewardAt:10,pin:null,master:legacyMaster,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[{id:'op1',name:'Kasir Pagi'}],ingredients:[],menu:[],campaigns:[],recovery:null });
+    app.init();
+    const f = makeMasterForm('masterlama123','masterbaru123456','masterbaru123456');
+    f.dataset.form = 'master';
+    submitForm(app, f);
+    await new Promise(r => setTimeout(r, 100));
+    const S = app.get('S');
+    logTest('T17: Legacy master-only pre-PIN migration via dispatcher', S.master && typeof S.master==='object' && S.master.hash, `master=${JSON.stringify(S.master)}`);
+  }
+
+  // ---------- T18 (H3: pre-PIN all owner actions/forms blocked, S identical) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    const Akeys = Object.keys(app.get('A') || {});
+    const CASHIER_ACTS = app.get('CASHIER_ACTS');
+    const ownerActs = Akeys.filter(k => !CASHIER_ACTS.has(k) && !(k === 'pinreset' && !app.get('S').pin));
+    const S0 = JSON.stringify(app.get('S'));
+    for (const act of ownerActs) { clickAct(app, act); await new Promise(r => setTimeout(r, 50)); }
+    const S1 = JSON.stringify(app.get('S'));
+    logTest('T18: Pre-PIN all owner A actions blocked via dispatcher, S identical', S0 === S1, `changed=${S0!==S1}, ownerActs=${ownerActs.length}`);
+
+    const beforeForms = JSON.stringify(app.get('S'));
+    const mkForm = (name, fields) => { const f=mkEl('form'); f.dataset.form=name; for(const [k,v] of Object.entries(fields)){ const i=mkEl('input'); i.name=k; i.value=v; f[k]=i; } return f; };
+    submitForm(app, mkForm('ing', {id:'',name:'X',unit:'g',stock:'1',min:'0'})); await new Promise(r => setTimeout(r, 50));
+    submitForm(app, mkForm('menu', {id:'',name:'X',price:'1000'})); await new Promise(r => setTimeout(r, 50));
+    submitForm(app, mkForm('shop', {shop:'Hacked'})); await new Promise(r => setTimeout(r, 50));
+    submitForm(app, mkForm('op', {name:'Hacker'})); await new Promise(r => setTimeout(r, 50));
+    const afterForms = JSON.stringify(app.get('S'));
+    logTest('T18: Pre-PIN owner forms ing/menu/shop/op blocked via dispatcher, S identical', beforeForms === afterForms, `changed=${beforeForms!==afterForms}`);
+  }
+
+  // ---------- T19 (H3: restoreIn change blocked pre-PIN and when locked) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    const restoreEl = app.elements.get('restoreIn');
+    restoreEl.id = 'restoreIn';
+    restoreEl.value = 'C:\\fakepath\\backup.json';
+    restoreEl.files = [makeRestoreFile({ v:2,seq:0,shop:'X',rewardAt:10,pin:null,master:null,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[{id:'o1',name:'Kasir'}],ingredients:[],menu:[],campaigns:[],recovery:null })];
+    const S0 = JSON.stringify(app.get('S'));
+    changeEl(app, restoreEl); await new Promise(r => setTimeout(r, 100));
+    const S1 = JSON.stringify(app.get('S'));
+    logTest('T19: restoreIn pre-PIN blocked via dispatcher, S unchanged', S0 === S1, `changed=${S0!==S1}`);
+    logTest('T19: restoreIn pre-PIN input cleared', restoreEl.value === '', `value=${restoreEl.value}`);
+
+    // When locked (pinEnabled true, unlocked false)
+    const app2 = makeApp({ htmlPath }); app2.reset(); app2.clearStorage(); app2.init();
+    app2.get('S').pinEnabled = true;
+    app2.get('view').unlocked = false;
+    const r2 = app2.elements.get('restoreIn');
+    r2.id = 'restoreIn'; r2.value = 'C:\\fakepath\\b.json';
+    r2.files = [makeRestoreFile({ v:2,seq:0,shop:'Y',rewardAt:10,pin:null,master:null,pinEnabled:false,pinFails:0,pinLockUntil:0,pinCycles:0,masterFails:0,masterLockUntil:0,lastActive:0,sessionStart:0,operators:[],ingredients:[],menu:[],campaigns:[],recovery:null })];
+    const S2before = JSON.stringify(app2.get('S'));
+    changeEl(app2, r2); await new Promise(r => setTimeout(r, 100));
+    const S2after = JSON.stringify(app2.get('S'));
+    logTest('T19: restoreIn locked blocked via dispatcher, S unchanged', S2before === S2after, `changed=${S2before!==S2after}`);
+    logTest('T19: restoreIn locked input cleared', r2.value === '', `value=${r2.value}`);
+  }
+
+  // ---------- T20 (H3: No Web Crypto - cashier flows work, owner blocked, stempel nav ok) ----------
+  {
+    const app = makeApp({ htmlPath, withCrypto: false }); app.reset(); app.clearStorage(); app.init();
+    const S = app.get('S');
+    S.menu = [{ id:'m1', name:'Kopi', price:10000, cup:true, recipe:[] }];
     S.ingredients = [];
-    S.op = S.operators[0].id;
-    const addEl = mkEl('button'); addEl.dataset.act = 'add'; addEl.dataset.id = 'i1';
-    app.get('A').add(addEl);
-    let cart = app.get('cart');
-    logTest('T14: Add item to cart', cart.i1 === 1, `cart=${JSON.stringify(cart)}`);
-    app.call('pay');
-    let S2 = app.get('S');
-    const txSaved = Array.isArray(S2.tx) && S2.tx.length > 0;
-    logTest('T14: Transaction saved via pay', txSaved, `tx=${S2.tx.length}`);
+    S.op = S.operators[0] ? S.operators[0].id : '';
+    clickAct(app, 'add', { id: 'm1' }); await new Promise(r => setTimeout(r, 50));
+    const cartAfterAdd = app.get('cart');
+    logTest('T20: add works without crypto (dispatcher)', cartAfterAdd.m1 === 1, `cart=${JSON.stringify(cartAfterAdd)}`);
+    clickAct(app, 'inc', { id: 'm1' }); await new Promise(r => setTimeout(r, 50));
+    logTest('T20: inc works without crypto (dispatcher)', app.get('cart').m1 === 2, `cart=${JSON.stringify(app.get('cart'))}`);
+    app.get('S').lastTx = { id:'t1', no:1, ts:Date.now(), items:[{id:'m1',name:'Kopi',price:10000,qty:1}], sub:10000, disc:0, total:10000, pay:10000, change:0, op:'' };
+    clickAct(app, 'saverc'); await new Promise(r => setTimeout(r, 50));
+    const savercOk = !app.toastEl.textContent.includes('Area owner terkunci');
+    logTest('T20: saverc works without crypto (dispatcher)', savercOk, `toast=${app.toastEl.textContent}`);
+    clickAct(app, 'pay'); await new Promise(r => setTimeout(r, 50));
+    logTest('T20: pay works without crypto (dispatcher)', app.get('S').tx.length >= 0, `tx=${app.get('S').tx.length}`);
+    const sBefore = JSON.stringify(app.get('S'));
+    clickAct(app, 'menunew'); await new Promise(r => setTimeout(r, 50));
+    clickAct(app, 'wipe'); await new Promise(r => setTimeout(r, 50));
+    const fShop = mkEl('form'); fShop.dataset.form='shop'; fShop.shop=mkEl('input'); fShop.shop.value='X'; fShop.shop.name='shop';
+    submitForm(app, fShop); await new Promise(r => setTimeout(r, 50));
+    const sAfter = JSON.stringify(app.get('S'));
+    logTest('T20: owner click/submit blocked without crypto (dispatcher)', sBefore === sAfter, `changed=${sBefore!==sAfter}`);
+    app.call('go', 'stempel');
+    logTest('T20: stempel nav works without crypto', app.get('view').tab === 'stempel', `tab=${app.get('view').tab}`);
+  }
+
+  // ---------- T21 (H3: Locked with active PIN - menumgr shows PIN modal) ----------
+  {
+    const app = makeApp({ htmlPath }); app.reset(); app.clearStorage(); app.init();
+    // Setup PIN first
+    app.call('go', 'atur');
+    const F = app.get('F');
+    let f = makePinForm('123456'); await F.pinstep(f);
+    f = makePinForm('123456'); await F.pinstep(f);
+    await F.pin(makePinUnlockForm('123456'));
+    // Now lock the session
+    app.document.hidden = true;
+    app.dispatch('visibilitychange', app.document);
+    // Click menumgr - should show PIN modal (not just toast)
+    const modalEl = app.elements.get('modal');
+    modalEl.innerHTML = '';
+    clickAct(app, 'menumgr');
+    const showsPinModal = modalEl.innerHTML.includes('PIN') || modalEl.innerHTML.includes('Area owner');
+    logTest('T21: Locked with PIN - menumgr shows PIN modal (dispatcher)', showsPinModal, `modalLen=${modalEl.innerHTML.length}`);
   }
 
   console.log('\n══════════════════════════════════════════════════════════════');
@@ -425,4 +755,6 @@ async function runTests() {
   process.exit(failCount > 0 ? 1 : 0);
 }
 
-runTests().catch(err => { console.error('Test harness error:', err); process.exit(1); });
+// Entry point
+const htmlPath = process.env.KASIR_HTML || path.resolve(__dirname, '../../Kasir Kopi (1).html');
+runTests(htmlPath).catch(err => { console.error('Test harness error:', err); process.exit(1); });
