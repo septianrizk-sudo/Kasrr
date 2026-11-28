@@ -248,10 +248,12 @@ let cryptoOK=true;
 function webCryptoOK(){return typeof window!=='undefined'&&window.crypto&&!!window.crypto.subtle;}
 function canAccessOwner(formName){
   if(!webCryptoOK())return false;
-  /* Form autentikasi (masuk/verifikasi) tidak terpagar owner: boleh diakses walau kunci. */
-  const AUTH_FORMS=new Set(['pin','master','pinstep','recovery','shop','op','mclose','confirmyes','tab']);
+  /* R3: AUTH_FORMS hanya untuk form autentikasi (masuk/verifikasi/PIN/ganti PIN) yang wajib
+     tetap dapat dipanggil walau area owner terkunci. Form bisnis lain default-deny. */
+  const AUTH_FORMS=new Set(['pin','recovery']);
   if(AUTH_FORMS.has(formName||''))return true;
-  return S.pinEnabled?view.unlocked:true;
+  /* R1: semua aksi/form bisnis owner hanya jika Web Crypto tersedia, PIN aktif, dan sesi terbuka. */
+  return !!(webCryptoOK() && S.pinEnabled && view.unlocked);
 }
 
 /* ============ Logika inti (murni) ============ */
@@ -434,17 +436,26 @@ function go(tab){
   if(tab===view.tab)return;
   const fromLocked=LOCKED.includes(view.tab);
   view.unlocked=false;
+  /* R9: Reset masterVerified saat berpindah/ meninggalkan tab owner. */
+  S.masterVerified=false;
+  /* R7: Fail-closed: cek webCryptoOK() SEBELUM cabang !S.pinEnabled,
+     sehingga area owner tidak bisa diakses punya crypto yang hilang juga pra-PIN. */
+  if(!webCryptoOK()){
+    toast('Kripto Web tidak tersedia. Area owner tidak dapat dibuka.',true);
+    view.tab='kasir';render();return;
+  }
   if(LOCKED.includes(tab)){
     pendingTab=tab;
+    /* R2: Pra-PIN: hanya tab Atur yang boleh; rekap dan stok DIBLOKIR */
     if(!S.pinEnabled){
-      /* First-time setup: owner area not yet protected — allow access to owner tab for setup */
-      view.tab=tab;render();return;
+      if(tab==='atur'){
+        view.tab=tab;render();return;
+      }else{
+        toast('Buat PIN dulu di menu Atur sebelum membuka '+tab+'.',true);
+        view.tab='kasir';render();return;
+      }
     }
-    /* Web Crypto fail-closed: jika tidak tersedia, area owner tidak bisa diakses */
-    if(!webCryptoOK()){
-      toast('Kripto Web tidak tersedia. Area owner tidak dapat dibuka.',true);
-      view.tab='kasir';render();return;
-    }
+    /* Web Crypto sudah OK, pinEnabled true -> minta PIN */
     if(fromLocked){view.tab='kasir';render()}
     askPin();
   }else{view.tab=tab;render()}
@@ -627,11 +638,12 @@ function migrate(o){
   /* ---- Schema v2 migration (idempotent) ----
      Data legacy (v1) menyimpan PIN/Master sebagai string hash. Area owner pada data legacy
      SUDAH terlindungi, jadi migrasi tidak boleh menurunkannya menjadi "belum dilindungi".
-     Set pinEnabled=true selama kredensial legacy masih ada agar proteksi tidak hilang;
-     PIN legacy akan dimigrasikan saat owner login (F.pin) dan Master legacy via form Master (F.master). */
+     Set pinEnabled=true HANYA jika o.pin adalah string legacy (kredensial PIN legacy ada).
+     Jika hanya master legacy tanpa pin, jangan set pinEnabled (akan menjadi pra-PIN) tetapi
+     tetap set migrationPending=true agar alur pra-PIN berlaku. */
   const legacyPin=typeof o.pin==='string';
   const legacyMaster=typeof o.master==='string';
-  if(legacyPin||legacyMaster){o.migrationPending=true;o.pinEnabled=true;}
+  if(legacyPin||legacyMaster){o.migrationPending=true;o.pinEnabled=!!legacyPin;}
   if(o.pin===undefined)o.pin=null;
   if(o.master===undefined)o.master=null;
   if(o.pinEnabled===undefined)o.pinEnabled=false;
@@ -901,8 +913,16 @@ function masterCardHtml(){
 }
 function vAtur(v){
   const unprotected=!S.pinEnabled;
-  v.innerHTML='<div class="stack"><div class="sec" style="margin:0"><h2>Pengaturan owner</h2><span class="badge '+(unprotected?'warn':'ok')+'">'+(unprotected?'Belum dilindungi':'Terbuka')+'</span></div>'+
-    (unprotected?'<div class="note warn">Area owner belum dilindungi — siapa pun yang membuka perangkat ini dapat mengakses data ini. Aktifkan PIN di bawah.</div>':'')+
+  if(unprotected){
+    /* R2: Pra-PIN, tab Atur hanya menampilkan kartu setup keamanan (PIN + Master Code). */
+    v.innerHTML='<div class="stack"><div class="sec" style="margin:0"><h2>Pengaturan owner</h2><span class="badge warn">Belum dilindungi</span></div>'+
+      '<div class="note warn">Area owner belum dilindungi — siapa pun yang membuka perangkat ini dapat mengakses data ini. Aktifkan PIN di bawah.</div>'+
+      '<div class="card stack"><h3>Aktifkan PIN</h3><div id="pinBox">'+pinBoxHtml()+'</div></div>'+
+      masterCardHtml()+
+      '<div class="card stack"><div class="note">Setelah PIN dibuat, aksi lain di menu ini (toko, operator, bahan, menu, kupon, cadangan) akan aktif.</div></div>';
+    return;
+  }
+  v.innerHTML='<div class="stack"><div class="sec" style="margin:0"><h2>Pengaturan owner</h2><span class="badge ok">Terbuka</span></div>'+
     '<form class="card stack" data-form="shop"><h3>Toko</h3><div class="field"><label for="shopIn">Nama toko (tampil di struk)</label><input id="shopIn" name="shop" type="text" value="'+esc(S.shop)+'"></div>'+
     '<button class="btn primary">Simpan</button></form>'+campCard()+
     '<div class="card stack"><h3>Operator kasir</h3><div>'+(S.operators.length?S.operators.map(o=>'<div class="row"><div class="grow"><strong>'+esc(o.name)+'</strong></div><button class="btn sm ghost" style="color:var(--danger)" data-act="opdel" data-id="'+o.id+'">Hapus</button></div>').join(''):'<div class="empty">Belum ada operator.</div>')+'</div>'+
@@ -916,8 +936,11 @@ function vAtur(v){
 }
 
 /* ============ Aksi klik ============ */
-/* Aksi khusus area owner: wajib lolos canAccessOwner() (PIN aktif) saat dipicu via handler. */
-const OWNER_ACTS=new Set(['ingnew','ingedit','ingdel','menunew','menuedit','menudel','opdel','campnew','campedit','campdel','restock','backup','backupWithCreds','endshift','wipe','expcsv','exppdf','expcopy','rkall']);
+/* R4: Default-deny untuk aksi klik. CASHIER_ACTS adalah daftar aksi kasir yang diizinkan
+   untuk siapa pun (tanpa PIN owner). Semua kunci lain di const A (termasuk menumgr,
+   saverc, pinreset, dan kunci baru di masa depan) dianggap aksi owner dan wajib lolos R1,
+   kecuali pinreset yang dibolehkan pra-PIN (R2). */
+const CASHIER_ACTS=new Set(['tab','mclose','confirmyes','forgot','add','inc','dec','clear','dtype','exact','pay','rcpt','copyrcpt','sub','rwtoggle','printer','prnpick','prnforget','prntest','prnrcpt']);
 const A={
   tab:t=>go(t.dataset.tab),
   mclose:()=>closeModal(),
@@ -985,7 +1008,10 @@ const A={
     },'Batal - atur ulang kredensial')
   }
 };
-document.addEventListener('click',e=>{const t=e.target.closest('[data-act]');if(!t)return;const act=t.dataset.act;if(OWNER_ACTS.has(act)&&!canAccessOwner()){e.preventDefault();toast('Area owner terkunci. Masukkan PIN.',true);return;}const f=A[act];if(f){e.preventDefault();f(t,e)}});
+document.addEventListener('click',e=>{const t=e.target.closest('[data-act]');if(!t)return;const act=t.dataset.act;
+  const gated=!CASHIER_ACTS.has(act)&&!(act==='pinreset'&&!S.pinEnabled);
+  if(gated&&!canAccessOwner()){e.preventDefault();toast('Area owner terkunci. Masukkan PIN.',true);return;}
+  const f=A[act];if(f){e.preventDefault();f(t,e)}});
 
 /* ============ Form submit ============ */
 const okPin=s=>/^\d{4,6}$/.test(s);
@@ -1064,6 +1090,11 @@ const F={
     const err=m=>{toast(m,true);};
     const mc=f.mc.value;
     const legacy=typeof S.master==='string';
+    /* R6: cek S.masterLockUntil di AWAL untuk semua cabang (legacy, pembuatan, verifikasi) SEBELUM perbandingan apa pun. */
+    if(S.masterLockUntil&&Date.now()<S.masterLockUntil){
+      err('Terkunci. Coba lagi nanti.');
+      return;
+    }
     /* Master Code minimal 12 karakter. */
     if(mc.length<12){err('Master Code minimal 12 karakter');return;}
     /* Legacy migration: verifikasi Master Code lama (input asli via legacyHash, bukan hash sebagai plaintext). */
@@ -1207,7 +1238,15 @@ const F={
     }
   }
 };
-document.addEventListener('submit',e=>{e.preventDefault();const f=e.target;const h=F[f.dataset.form];if(h&&canAccessOwner(f.dataset.form))h(f)});
+document.addEventListener('submit',e=>{e.preventDefault();const f=e.target;const h=F[f.dataset.form];
+  if(!h)return;
+  if(!canAccessOwner(f.dataset.form)){
+    /* R3: Jangan diam saat submit diblokir. */
+    if(!webCryptoOK())toast('Kripto Web tidak tersedia. Area owner tidak dapat diakses.',true);
+    else toast('Area owner terkunci. Masukkan PIN.',true);
+    return;
+  }
+  h(f)});
 
 /* ============ Input & change ============ */
 document.addEventListener('input',e=>{
@@ -1235,6 +1274,11 @@ document.addEventListener('change',e=>{
         const hasEnvelope=!(!(o.pin||o.master)||(o.pin&&typeof o.pin=='string'&&!o.pin.hash)||(o.master&&typeof o.master=='string'&&!o.master.hash));
         const legacy=!hasEnvelope&&(o.pin&&typeof o.pin=='string'&&o.pin.startsWith('h'));
         const clearCreds=()=>{S.pin=null;S.master=null;S.pinEnabled=false;S.recovery=null;S.pinFails=0;S.pinLockUntil=0;S.masterFails=0;S.masterLockUntil=0;};
+        if(!canAccessOwner('restock')){
+          toast('Area owner terkunci. Masukkan PIN.',true);
+          t.value='';
+          return;
+        }
         if(legacy){
           confirmBox('Backup ini tidak berisi kredensial terenkripsi. Data bisnis akan dipulihkan, namun PIN & Master Code harus diatur ulang. Lanjutkan?',()=>{S=migrate(o);clearCreds();save();toast('Data dipulihkan - kredensial wajib diatur ulang');render();},'Pulihkan tanpa kredensial');
         }else if(hasEnvelope){
@@ -1253,12 +1297,18 @@ function tick(){const d=new Date();const el=$('#clock');if(el)el.textContent=d.t
 function init(){
   S=migrate(load());
   if(!S.op||!S.operators.some(o=>o.id===S.op))S.op='';
-  /* ---- Web Crypto probe (fail-closed) ---- */
-  if(!window.crypto||!window.crypto.subtle){toast('Web Crypto tidak didukung - fitur owner tidak tersedia',true);render();return;}
+  /* R7: gunakan webCryptoOK() (bukan cek langsung). Jika false: set cryptoOK=false, toast, tapi LANJUTKAN init (render, tick, setInterval, listener, downloads). Lewati hanya recovery wizard dan idle timer owner. */
+  const cryptoAvail=webCryptoOK();
+  if(!cryptoAvail){
+    cryptoOK=false;
+    toast('Web Crypto tidak didukung - fitur owner tidak tersedia',true);
+  }else{
+    cryptoOK=true;
+  }
   /* ---- Session tracking & resume recovery ---- */
   S.lastActive=Date.now();if(!S.sessionStart)S.sessionStart=S.lastActive;
   /* ---- Resume recovery wizard if pending ---- */
-  if(S.recovery){
+  if(S.recovery && cryptoAvail){
     /* Resume: force re-verify old Master Code (no permanent masterVerified authorization). */
     S.recovery.step=1;
     render();
@@ -1266,8 +1316,16 @@ function init(){
   }
   /* ---- Session lock (idle 5min, visibility hidden) ---- */
   let idleTimer=null;
-  function lock(){view.unlocked=false;closeModal();go('kasir');clearTimeout(idleTimer);idleTimer=null;}
-  const resetIdle=()=>{clearTimeout(idleTimer);S.lastActive=Date.now();idleTimer=setTimeout(()=>{lock();save();render();toast('Sesi kedaluwarsa — terlalu lama tidak aktif. Masukkan PIN/Master.');},5*60*1000);};
+  function lock(){
+    /* R9: Reset masterVerified=false saat lock (idle/background). */
+    S.masterVerified=false;
+    view.unlocked=false;
+    closeModal();
+    go('kasir');
+    clearTimeout(idleTimer);
+    idleTimer=null;
+  }
+  const resetIdle=()=>{clearTimeout(idleTimer);S.lastActive=Date.now();if(cryptoAvail){idleTimer=setTimeout(()=>{lock();save();render();toast('Sesi kedaluwarsa — terlalu lama tidak aktif. Masukkan PIN/Master.');},5*60*1000);}};
   resetIdle();
   document.addEventListener('mousemove',resetIdle);
   document.addEventListener('keydown',resetIdle);
