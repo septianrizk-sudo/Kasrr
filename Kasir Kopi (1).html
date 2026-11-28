@@ -237,7 +237,21 @@ function rollbackState(){
   }
 }
 function save(){
-  try{localStorage.setItem(KEY,JSON.stringify(S));SNAPSHOT=null;return true}catch(e){memOnly=true;banner();rollbackState();return false}
+  /* masterVerified jangan pernah ditulis ke localStorage (session-only; fitur tambahan §8 test T24). */
+  const persist=Object.assign({},S);
+  delete persist.masterVerified;
+  try{localStorage.setItem(KEY,JSON.stringify(persist));SNAPSHOT=null;return true}catch(e){memOnly=true;banner();rollbackState();return false}
+}
+
+/* ---- Web Crypto fail-closed & akses owner ---- */
+let cryptoOK=true;
+function webCryptoOK(){return typeof window!=='undefined'&&window.crypto&&!!window.crypto.subtle;}
+function canAccessOwner(formName){
+  if(!webCryptoOK())return false;
+  /* Form autentikasi (masuk/verifikasi) tidak terpagar owner: boleh diakses walau kunci. */
+  const AUTH_FORMS=new Set(['pin','master','pinstep','recovery','shop','op','mclose','confirmyes','tab']);
+  if(AUTH_FORMS.has(formName||''))return true;
+  return S.pinEnabled?view.unlocked:true;
 }
 
 /* ============ Logika inti (murni) ============ */
@@ -426,6 +440,11 @@ function go(tab){
       /* First-time setup: owner area not yet protected — allow access to owner tab for setup */
       view.tab=tab;render();return;
     }
+    /* Web Crypto fail-closed: jika tidak tersedia, area owner tidak bisa diakses */
+    if(!webCryptoOK()){
+      toast('Kripto Web tidak tersedia. Area owner tidak dapat dibuka.',true);
+      view.tab='kasir';render();return;
+    }
     if(fromLocked){view.tab='kasir';render()}
     askPin();
   }else{view.tab=tab;render()}
@@ -605,10 +624,14 @@ async function deliver(filename,data){
 /* ============ Campaign reward ============ */
 function migrate(o){
   if(!Array.isArray(o.campaigns))o.campaigns=[{id:uid(),name:'Gratis 1 cup',cost:o.rewardAt||10,type:'free',menuId:'',value:0,active:true,from:'',to:''}];
-  /* ---- Schema v2 migration (idempotent) ---- */
-  if(typeof o.pin==='string'||typeof o.master==='string'){
-    o.migrationPending=!!(o.pin||o.master);
-  }
+  /* ---- Schema v2 migration (idempotent) ----
+     Data legacy (v1) menyimpan PIN/Master sebagai string hash. Area owner pada data legacy
+     SUDAH terlindungi, jadi migrasi tidak boleh menurunkannya menjadi "belum dilindungi".
+     Set pinEnabled=true selama kredensial legacy masih ada agar proteksi tidak hilang;
+     PIN legacy akan dimigrasikan saat owner login (F.pin) dan Master legacy via form Master (F.master). */
+  const legacyPin=typeof o.pin==='string';
+  const legacyMaster=typeof o.master==='string';
+  if(legacyPin||legacyMaster){o.migrationPending=true;o.pinEnabled=true;}
   if(o.pin===undefined)o.pin=null;
   if(o.master===undefined)o.master=null;
   if(o.pinEnabled===undefined)o.pinEnabled=false;
@@ -620,6 +643,8 @@ function migrate(o){
   if(o.masterLockUntil===undefined)o.masterLockUntil=0;
   if(o.lastActive===undefined)o.lastActive=0;
   if(o.sessionStart===undefined)o.sessionStart=0;
+  /* masterVerified bersifat session-only: selalu direset saat load, tidak pernah dipersist. */
+  o.masterVerified=false;
   if(o.schemaVersion===undefined)o.schemaVersion=2;
   return o;
 }
@@ -840,8 +865,10 @@ function pinBoxHtml(){
   const setup=!S.pin;
   const labels=setup?['PIN baru (4-6 angka)','Ulangi PIN baru']:['PIN lama','PIN baru (4-6 angka)','Ulangi PIN baru'];
   const total=setup?2:3;
+  const masterOffer=setup?'<div class="note warn">Sesuai kebijakan owner: setelah PIN aktif, buat Master Code (min. 12 karakter) di menu Atur sebagai jaminan pemulihan.</div>':'';
   return '<form data-form="pinstep" class="stack"><div class="lbl">Langkah '+(pinStep.n+1)+' dari '+total+'</div>'+
     '<div class="field"><label for="ps">'+labels[pinStep.n]+'</label><input id="ps" name="v" type="password" inputmode="numeric" autocomplete="off" maxlength="6"></div><div id="psErr"></div>'+
+    masterOffer+
     '<div class="grid2">'+(pinStep.n?'<button type="button" class="btn" data-act="pinreset">Ulangi dari awal</button>':'<span></span>')+'<button class="btn primary">'+(setup?(pinStep.n===1?'Aktifkan PIN':'Lanjut'):(pinStep.n===total-1?'Simpan PIN':'Lanjut'))+'</button></div></form>';
 }
 function masterCardHtml(){
@@ -889,6 +916,8 @@ function vAtur(v){
 }
 
 /* ============ Aksi klik ============ */
+/* Aksi khusus area owner: wajib lolos canAccessOwner() (PIN aktif) saat dipicu via handler. */
+const OWNER_ACTS=new Set(['ingnew','ingedit','ingdel','menunew','menuedit','menudel','opdel','campnew','campedit','campdel','restock','backup','backupWithCreds','endshift','wipe','expcsv','exppdf','expcopy','rkall']);
 const A={
   tab:t=>go(t.dataset.tab),
   mclose:()=>closeModal(),
@@ -956,7 +985,7 @@ const A={
     },'Batal - atur ulang kredensial')
   }
 };
-document.addEventListener('click',e=>{const t=e.target.closest('[data-act]');if(!t)return;const f=A[t.dataset.act];if(f){e.preventDefault();f(t,e)}});
+document.addEventListener('click',e=>{const t=e.target.closest('[data-act]');if(!t)return;const act=t.dataset.act;if(OWNER_ACTS.has(act)&&!canAccessOwner()){e.preventDefault();toast('Area owner terkunci. Masukkan PIN.',true);return;}const f=A[act];if(f){e.preventDefault();f(t,e)}});
 
 /* ============ Form submit ============ */
 const okPin=s=>/^\d{4,6}$/.test(s);
@@ -976,7 +1005,12 @@ const F={
         ok=true;
         snapshotState();
         S.pin=await makeEnvelope(v);
-        S.master=S.master&&typeof S.master==='string'?await makeEnvelope(S.master):null;
+        /* Legacy Master (string hash) TIDAK di-wrap jadi envelope di sini: plaintext aslinya
+           tidak diketahui; membalik hash lama menjadi envelope akan menghasilkan double-hash dan
+           membuat Master legacy tidak bisa diverifikasi lagi. Master legacy disisihkan (state legacy
+           sementara) dan dimigrasikan terpusat lewat form Master di F.master. */
+        if(!S.master)S.master=null;
+        S.masterVerified=false;
         S.pinEnabled=true;
         S.migrationPending=false;
         if(!save()){rollbackState();askPin('Migrasi gagal. Coba lagi.');return;}
@@ -1037,7 +1071,15 @@ const F={
       const mcOld=f.mcOld.value||'';
       if(!mcOld)return err('Masukkan Master Code lama.');
       /* Jangan asumsi hash lama sebagai plaintext. Verifikasi input asli pemilik melalui legacy verifier. */
-      if(legacyHash(mcOld)!==S.master)return err('Master Code lama salah.');
+      if(legacyHash(mcOld)!==S.master){
+        S.masterFails=(S.masterFails||0)+1;
+        if(S.masterFails>=3){
+          S.masterFails=0;S.masterLockUntil=Date.now()+60000;save();
+          return err('Terlalu banyak percobaan. Terkunci 60 detik.');
+        }
+        save();return err('Master Code lama salah.');
+      }
+      S.masterFails=0;S.masterLockUntil=0;
       const mc2=f.mc2.value||'';
       if(mc2!==mc)return err('Konfirmasi Master Code baru tidak cocok.');
       snapshotState();
@@ -1078,7 +1120,7 @@ const F={
         if(save()){
           pinStep={n:0,old:'',nw:''};
           view.unlocked=false;
-          toast('PIN berhasil dibuat. Area owner kini memerlukan PIN.');
+          toast(!S.master?'PIN aktif. Segera buat Master Code di menu Atur agar PIN bisa dipulihkan.':'PIN berhasil dibuat. Area owner kini memerlukan PIN.');
           go('kasir');
           return;
         }
@@ -1165,7 +1207,7 @@ const F={
     }
   }
 };
-document.addEventListener('submit',e=>{e.preventDefault();const f=e.target;const h=F[f.dataset.form];if(h)h(f)});
+document.addEventListener('submit',e=>{e.preventDefault();const f=e.target;const h=F[f.dataset.form];if(h&&canAccessOwner(f.dataset.form))h(f)});
 
 /* ============ Input & change ============ */
 document.addEventListener('input',e=>{
